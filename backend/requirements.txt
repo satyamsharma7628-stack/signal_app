@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+supabase
+feedparser
+requests
+praw
+google-generativeai
+beautifulsoup4
+python-dotenv

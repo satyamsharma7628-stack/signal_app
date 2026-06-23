@@ -1,0 +1,23 @@
+name: Trigger digest refresh
+
+# Wakes the Render backend (which sleeps after ~15 min idle on the free
+# tier) and triggers a fetch, so the feed stays current even if nobody
+# opens the app. GitHub's cron scheduling is "best effort" and can run a
+# few minutes late under load -- fine for a personal digest, just don't
+# expect exact 15-minute precision.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}  # lets you trigger it manually from the Actions tab too
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger refresh
+        run: |
+          curl -X POST "${{ secrets.BACKEND_URL }}/api/refresh" \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 10 \
+            --fail-with-body
