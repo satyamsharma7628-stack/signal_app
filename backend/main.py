@@ -39,7 +39,8 @@ app = FastAPI(title="Signal API")
 FRONTEND_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
-    # "https://your-project.pages.dev",  # <- add your real deployed URL here
+    "https://signal-app-asd.pages.dev",
+    "https://signal-app-asd.pages.dev/",
 ]
 app.add_middleware(
     CORSMiddleware,
