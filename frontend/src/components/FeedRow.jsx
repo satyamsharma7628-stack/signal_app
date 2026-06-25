@@ -1,6 +1,16 @@
 import { useState } from 'react'
 import { getSummary } from '../api'
 
+const DEPT_META = {
+  'cybersecurity':   { label: '🔒 Cybersecurity', color: '#e07070' },
+  'ai-ml':           { label: '🤖 AI / ML',        color: '#a78bfa' },
+  'gaming-tech':     { label: '🎮 Gaming Tech',     color: '#60b8ff' },
+  'cloud':           { label: '☁️ Cloud',           color: '#5fbf7a' },
+  'web-dev':         { label: '🌐 Web Dev',         color: '#ff8c1a' },
+  'innovator':       { label: '🚀 Innovator',       color: '#f9c04a' },
+  'random-dev-idea': { label: '🎲 Random',          color: '#8b8a85' },
+}
+
 export default function FeedRow({ item }) {
   const [expanded, setExpanded] = useState(false)
   const [summary, setSummary] = useState(null)
@@ -33,6 +43,8 @@ export default function FeedRow({ item }) {
     }
   }
 
+  const depts = item.dept || []
+
   return (
     <div className={`row ${item.is_builder_idea ? 'is-idea' : ''}`}>
       <div className="row-top">
@@ -49,6 +61,25 @@ export default function FeedRow({ item }) {
         {item.title}
       </a>
       <div className="row-summary">{item.summary || 'No summary available.'}</div>
+
+      {/* Dept chips */}
+      {depts.length > 0 && (
+        <div className="dept-chips-row">
+          {depts.map((d) => {
+            const meta = DEPT_META[d]
+            if (!meta) return null
+            return (
+              <span
+                key={d}
+                className="chip chip-dept"
+                style={{ borderColor: meta.color, color: meta.color }}
+              >
+                {meta.label}
+              </span>
+            )
+          })}
+        </div>
+      )}
 
       {item.stack_tags?.length > 0 && (
         <div className="stack-row">

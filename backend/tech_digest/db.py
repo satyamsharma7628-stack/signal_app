@@ -71,6 +71,8 @@ class SQLiteQueryBuilder:
                 item = dict(item)
                 if "stack_tags" in item and isinstance(item["stack_tags"], list):
                     item["stack_tags"] = json.dumps(item["stack_tags"])
+                if "dept" in item and isinstance(item["dept"], list):
+                    item["dept"] = json.dumps(item["dept"])
                 if "is_builder_idea" in item:
                     item["is_builder_idea"] = 1 if item["is_builder_idea"] else 0
 
@@ -125,6 +127,11 @@ class SQLiteQueryBuilder:
                         row_dict["stack_tags"] = json.loads(row_dict["stack_tags"])
                     except Exception:
                         row_dict["stack_tags"] = []
+                if "dept" in row_dict and isinstance(row_dict["dept"], str):
+                    try:
+                        row_dict["dept"] = json.loads(row_dict["dept"])
+                    except Exception:
+                        row_dict["dept"] = []
                 if "is_builder_idea" in row_dict:
                     row_dict["is_builder_idea"] = bool(row_dict["is_builder_idea"])
                 data.append(row_dict)
@@ -156,6 +163,7 @@ class SQLiteSupabaseClient:
                 is_builder_idea BOOLEAN DEFAULT 0,
                 stack_tags TEXT DEFAULT '[]',
                 dedup_key TEXT DEFAULT '',
+                dept TEXT DEFAULT '[]',
                 updated_at TEXT
             )
         """)

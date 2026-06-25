@@ -1,14 +1,17 @@
 """
 Post-processing stage that runs on the full combined list from fetch_all,
-before it's written to JSON. Two jobs, kept separate from fetching on purpose
+before it's written to JSON. Three jobs, kept separate from fetching on purpose
 so each source stays a dumb, swappable adapter:
 
 1. Dedup near-identical stories that show up across multiple sources
    (e.g. the same launch on HN, Product Hunt, and r/startups).
 2. Tag "builder idea" items -- things where someone built and shared a
    project -- and pull out a light stack/tech tag list from the text.
+3. Tag tech department(s) -- which domain does this item belong to
+   (cybersecurity, ai-ml, gaming-tech, cloud, web-dev, innovator, random-dev-idea).
+   An item can belong to multiple depts. Keyword matching on title + summary.
 
-Both steps are deliberately simple (normalized-title matching, keyword
+All steps are deliberately simple (normalized-title matching, keyword
 matching) rather than ML-based, so they're cheap, fast, and easy to debug.
 """
 import re
@@ -181,8 +184,126 @@ def tag_builder_ideas(items: Iterable[NewsItem]) -> None:
             item.category = "idea"
 
 
+# --- Tech department tagging ---------------------------------------------
+
+# Each dept maps to (keywords_in_title_or_summary, source_names_that_always_match).
+# Keywords are matched case-insensitively against the combined title+summary text.
+# Source shortcuts let us assign dept without keyword guessing for known feeds --
+# e.g. Krebs on Security is always cybersecurity regardless of title wording.
+_DEPT_RULES: list[tuple[str, list[str], list[str]]] = [
+    (
+        "cybersecurity",
+        [
+            "hack", "hacked", "hacking", "vulnerability", "vulnerabilities",
+            "CVE", "ransomware", "malware", "exploit", "phishing", "breach",
+            "zero-day", "0-day", "CISA", "threat", "attack", "infosec",
+            "cybersecurity", "security flaw", "data leak", "credential",
+            "botnet", "spyware", "trojan", "backdoor", "patch tuesday",
+            "penetration test", "pentest", "red team", "SIEM", "SOC",
+        ],
+        ["Krebs on Security", "The Hacker News"],
+    ),
+    (
+        "ai-ml",
+        [
+            "AI", "artificial intelligence", "LLM", "large language model",
+            "GPT", "ChatGPT", "machine learning", "deep learning", "neural network",
+            "transformer", "diffusion model", "fine-tun", "inference", "training",
+            "dataset", "benchmark", "embedding", "RAG", "retrieval", "generative",
+            "foundation model", "multimodal", "computer vision", "NLP",
+            "reinforcement learning", "reward model", "agent", "autonomous",
+            "Hugging Face", "arXiv", "PyTorch", "TensorFlow", "JAX",
+        ],
+        ["Hugging Face Papers", "Hugging Face Models", "arXiv"],
+    ),
+    (
+        "gaming-tech",
+        [
+            "game", "gaming", "gamer", "GPU", "Unity", "Unreal Engine",
+            "DirectX", "Vulkan", "OpenGL", "shader", "ray tracing",
+            "esports", "gamedev", "game engine", "game dev", "AAA",
+            "indie game", "Steam", "PlayStation", "Xbox", "Nintendo",
+            "VR", "virtual reality", "AR", "augmented reality", "metaverse",
+        ],
+        [],
+    ),
+    (
+        "cloud",
+        [
+            "AWS", "Amazon Web Services", "Azure", "GCP", "Google Cloud",
+            "Kubernetes", "k8s", "Docker", "container", "serverless",
+            "cloud computing", "infrastructure", "DevOps", "Terraform",
+            "CI/CD", "microservice", "service mesh", "Istio", "Helm",
+            "DigitalOcean", "Cloudflare", "CDN", "load balancer",
+            "auto-scaling", "SRE", "observability", "monitoring",
+        ],
+        [],
+    ),
+    (
+        "web-dev",
+        [
+            "React", "Next.js", "Vue", "Svelte", "Angular", "CSS",
+            "JavaScript", "TypeScript", "frontend", "backend", "full-stack",
+            "REST API", "GraphQL", "Node.js", "browser", "Vite", "webpack",
+            "web performance", "accessibility", "PWA", "WebAssembly", "WASM",
+            "HTML", "DOM", "web component", "Tailwind", "Sass",
+        ],
+        ["Stack Overflow Blog", "Smashing Magazine"],
+    ),
+    (
+        "innovator",
+        [
+            "startup", "founder", "funding", "seed round", "Series A",
+            "Series B", "venture", "VC", "bootstrapped", "bootstrapping",
+            "indie hacker", "product launch", "YC", "Y Combinator",
+            "acquisition", "IPO", "unicorn", "pivot", "MVP", "go-to-market",
+        ],
+        ["Product Hunt", "IndieHackers"],
+    ),
+]
+
+# Fallback bucket -- assigned when no other dept matches.
+_FALLBACK_DEPT = "random-dev-idea"
+
+# Pre-compile one regex per dept for speed across large item lists.
+_DEPT_PATTERNS: list[tuple[str, re.Pattern, list[str]]] = [
+    (
+        dept,
+        re.compile(
+            r"\b(" + "|".join(re.escape(kw) for kw in keywords) + r")\b",
+            re.IGNORECASE,
+        ) if keywords else re.compile(r"(?!x)x"),  # never-match placeholder
+        sources,
+    )
+    for dept, keywords, sources in _DEPT_RULES
+]
+
+
+def tag_dept(items: Iterable[NewsItem]) -> None:
+    """Mutates items in place: sets item.dept to a list of matching
+    tech department slugs. An item can belong to multiple depts (e.g. an
+    AI security paper lands in both 'ai-ml' and 'cybersecurity').
+    Items that match nothing fall into ['random-dev-idea'] as a catch-all.
+    """
+    for item in items:
+        text = f"{item.title} {item.summary or ''}"
+        matched: list[str] = []
+
+        for dept, pattern, always_sources in _DEPT_PATTERNS:
+            # Source shortcut: certain feeds always belong to a dept.
+            if any(item.source == s or item.source.startswith(s) for s in always_sources):
+                matched.append(dept)
+                continue
+            # Keyword match on combined title + summary.
+            if pattern.search(text):
+                matched.append(dept)
+
+        item.dept = matched if matched else [_FALLBACK_DEPT]
+
+
 def enrich(items: list[NewsItem]) -> list[NewsItem]:
     """Single entry point fetch_all calls: tag first (needs original
     per-item context), then dedup (needs the full list)."""
     tag_builder_ideas(items)
+    tag_dept(items)          # <-- new stage
     return dedup_items(items)

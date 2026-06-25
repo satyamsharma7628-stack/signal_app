@@ -6,6 +6,16 @@ import { getStatus, getItems, triggerRefresh } from './api'
 
 const PAGE_SIZE = 12
 
+const DEPT_META = {
+  'cybersecurity': { label: '🔒 Cybersecurity', color: '#e07070' },
+  'ai-ml':         { label: '🤖 AI / ML',        color: '#a78bfa' },
+  'gaming-tech':   { label: '🎮 Gaming Tech',     color: '#60b8ff' },
+  'cloud':         { label: '☁️ Cloud',           color: '#5fbf7a' },
+  'web-dev':       { label: '🌐 Web Dev',         color: '#ff8c1a' },
+  'innovator':     { label: '🚀 Innovator',       color: '#f9c04a' },
+  'random-dev-idea': { label: '🎲 Random Dev Idea', color: '#8b8a85' },
+}
+
 export default function App() {
   const [theme, setTheme] = useState('dark')
   const [status, setStatus] = useState(null)
@@ -19,6 +29,7 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [source, setSource] = useState('')
   const [categoryOrStack, setCategoryOrStack] = useState('')
+  const [dept, setDept] = useState('')        // active dept filter
   const [sort, setSort] = useState('newest')
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
 
@@ -49,9 +60,6 @@ export default function App() {
 
   useEffect(() => {
     loadAll()
-    // Light polling while the tab is open -- catches a fetch that finished
-    // in the background (e.g. triggered by the cron job) without the user
-    // needing to manually refresh.
     const interval = setInterval(() => {
       getStatus().then(setStatus).catch(() => {})
     }, 60000)
@@ -62,8 +70,6 @@ export default function App() {
     setRefreshing(true)
     try {
       await triggerRefresh()
-      // Poll status every 4s for up to ~40s waiting for the background
-      // fetch to finish, then reload the feed once it's done.
       for (let i = 0; i < 10; i++) {
         await new Promise((r) => setTimeout(r, 4000))
         const s = await getStatus()
@@ -95,8 +101,22 @@ export default function App() {
     return Array.from(set).sort()
   }, [baseItems])
 
+  // Count items per dept for badge numbers on dept pills
+  const deptCounts = useMemo(() => {
+    const counts = {}
+    baseItems.forEach((i) => {
+      (i.dept || []).forEach((d) => {
+        counts[d] = (counts[d] || 0) + 1
+      })
+    })
+    return counts
+  }, [baseItems])
+
   const filtered = useMemo(() => {
     let result = [...baseItems]
+    if (dept) {
+      result = result.filter((i) => (i.dept || []).includes(dept))
+    }
     if (search) {
       const q = search.toLowerCase()
       result = result.filter(
@@ -120,7 +140,7 @@ export default function App() {
       result.sort((a, b) => (b.engagement_raw || 0) - (a.engagement_raw || 0))
     }
     return result
-  }, [baseItems, search, source, categoryOrStack, sort, isIdeasTab])
+  }, [baseItems, search, source, categoryOrStack, dept, sort, isIdeasTab])
 
   const visible = filtered.slice(0, visibleCount)
 
@@ -128,6 +148,12 @@ export default function App() {
     setIsIdeasTab(toIdeas)
     setSource('')
     setCategoryOrStack('')
+    setDept('')
+    setVisibleCount(PAGE_SIZE)
+  }
+
+  function switchDept(d) {
+    setDept(d)
     setVisibleCount(PAGE_SIZE)
   }
 
@@ -192,6 +218,31 @@ export default function App() {
             </p>
           )}
 
+          {/* ── Dept filter pills ── */}
+          <div className="dept-bar">
+            <button
+              className={`dept-pill ${dept === '' ? 'active' : ''}`}
+              onClick={() => switchDept('')}
+            >
+              All
+            </button>
+            {Object.entries(DEPT_META).map(([slug, { label, color }]) => {
+              const count = deptCounts[slug] || 0
+              if (count === 0) return null
+              return (
+                <button
+                  key={slug}
+                  className={`dept-pill ${dept === slug ? 'active' : ''}`}
+                  style={dept === slug ? { borderColor: color, color } : {}}
+                  onClick={() => switchDept(dept === slug ? '' : slug)}
+                >
+                  {label}
+                  <span className="dept-count">{count}</span>
+                </button>
+              )
+            })}
+          </div>
+
           <div className="filter-bar">
             <input
               type="text"
@@ -227,6 +278,9 @@ export default function App() {
 
           <div className="results-caption">
             Showing {visible.length} of {filtered.length} items
+            {dept && DEPT_META[dept] && (
+              <span className="dept-active-label"> in {DEPT_META[dept].label}</span>
+            )}
           </div>
 
           {visible.length === 0 ? (

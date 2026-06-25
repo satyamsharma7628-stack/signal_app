@@ -20,6 +20,7 @@ class NewsItem:
     summary: str = ""
     is_builder_idea: bool = False   # True for "Show HN", r/startups builds, indie launches, etc.
     stack_tags: list[str] = field(default_factory=list)  # extracted tech mentions, e.g. ["Next.js", "Postgres"]
+    dept: list[str] = field(default_factory=list)        # tech department(s), e.g. ["ai-ml", "cybersecurity"]
     dedup_key: str = ""     # normalized title used to collapse cross-source duplicates
 
     def to_dict(self) -> dict:

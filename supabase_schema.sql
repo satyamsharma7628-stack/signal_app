@@ -12,6 +12,7 @@ create table if not exists items (
     summary text default '',
     is_builder_idea boolean default false,
     stack_tags text[] default '{}',
+    dept text[] default '{}',
     dedup_key text default '',
     updated_at timestamptz default now()
 );
@@ -68,3 +69,14 @@ create policy "anon read access" on summary_cache
     for select
     to anon
     using (true);
+
+-- ── Dept column migration (add this if upgrading an existing deployment) ──
+-- Run this in Supabase SQL Editor if the items table already exists:
+--
+--   ALTER TABLE items ADD COLUMN IF NOT EXISTS dept text[] default '{}';
+--   CREATE INDEX IF NOT EXISTS idx_items_dept ON items USING gin(dept);
+--
+-- The gin index makes array-contains queries fast once the table is large.
+-- For a fresh deployment the CREATE TABLE above already includes the column.
+
+create index if not exists idx_items_dept on items using gin(dept);
