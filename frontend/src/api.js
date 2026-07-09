@@ -52,6 +52,17 @@ export function triggerRefresh() {
 }
 
 export function getSummary(item) {
+  // If the person has added their own Gemini key (Settings -> "Add Gemini
+  // key"), send it along so the backend uses it instead of the shared
+  // server-side key. Read straight from localStorage here rather than
+  // threading it through every component that calls getSummary.
+  let userKey = ''
+  try {
+    userKey = localStorage.getItem('signal_gemini_api_key') || ''
+  } catch {
+    // localStorage unavailable -- fall back to the server's shared key
+  }
+
   return fetchWithRetry(
     '/api/summary',
     {
@@ -62,6 +73,7 @@ export function getSummary(item) {
         title: item.title,
         category: item.category,
         existing_summary: item.summary || '',
+        gemini_api_key: userKey || undefined,
       }),
     },
     { retries: 1 }
