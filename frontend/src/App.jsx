@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import StatusBar from './components/StatusBar'
 import KpiStrip from './components/KpiStrip'
 import FeedRow from './components/FeedRow'
+import ApiKeySettings from './components/ApiKeySettings'
 import { getStatus, getItems, triggerRefresh } from './api'
 
 const PAGE_SIZE = 12
@@ -166,6 +167,7 @@ export default function App() {
           <span className="tag">tech digest</span>
         </div>
         <div className="header-actions">
+          <ApiKeySettings />
           <button className="icon-btn" onClick={handleManualRefresh} disabled={refreshing}>
             {refreshing ? 'Refreshing…' : 'Refresh now'}
           </button>
