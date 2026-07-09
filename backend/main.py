@@ -150,24 +150,45 @@ class SummaryRequest(BaseModel):
     title: str
     category: str
     existing_summary: str = ""
+    # Optional: a Gemini API key supplied by the person from the frontend's
+    # "Add Gemini key" setting. Never stored server-side -- used only for
+    # this one request, then discarded. Lets a visitor generate as many
+    # summaries as they want on their own quota instead of sharing this
+    # server's GEMINI_API_KEY (which is otherwise a small shared pool and
+    # the main reason summaries fall back to the mock placeholder once
+    # it's exhausted).
+    gemini_api_key: Optional[str] = None
 
 
 @app.post("/api/summary")
 def get_summary(req: SummaryRequest):
-    cached = get_cached_summary(req.url)
-    if cached:
-        return {"summary": cached, "cached": True}
+    using_own_key = bool(req.gemini_api_key)
+
+    # The shared cache is keyed by URL only and is meant for the common
+    # server-key path. When someone brings their own key we skip it in both
+    # directions: we don't want one visitor's personal-key generation to be
+    # silently served to everyone else from cache, and we don't want a
+    # personal request to get short-circuited by a stale mock/server-key
+    # summary that's already cached for that URL.
+    if not using_own_key:
+        cached = get_cached_summary(req.url)
+        if cached:
+            return {"summary": cached, "cached": True}
+
     try:
         generated = summarize_article(
             url=req.url,
             title=req.title,
             category=req.category,
             existing_summary=req.existing_summary,
-            api_key=os.environ.get("GEMINI_API_KEY"),
+            api_key=req.gemini_api_key or os.environ.get("GEMINI_API_KEY"),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Summary generation failed: {e}")
-    save_summary_to_cache(req.url, generated)
+
+    if not using_own_key:
+        save_summary_to_cache(req.url, generated)
+
     return {"summary": generated, "cached": False}
 
 
@@ -176,4 +197,3 @@ def health():
     # Cheap endpoint for the cron job to hit first if you ever want a
     # pure "wake up" ping separate from triggering a real fetch.
     return {"ok": True}
-
