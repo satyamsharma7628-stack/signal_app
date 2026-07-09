@@ -557,3 +557,90 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   font-family: var(--mono);
   letter-spacing: 0.01em;
 }
+
+/* ── API key settings modal ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 1rem;
+}
+
+.modal-card {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 8px);
+  padding: 1.25rem;
+  max-width: 440px;
+  width: 100%;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+
+.modal-card h3 {
+  margin: 0 0 0.6rem;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.modal-desc {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  margin: 0 0 0.9rem;
+}
+
+.modal-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.5rem 0.6rem;
+  border-radius: var(--radius-sm, 4px);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.modal-input:focus {
+  outline: 2px solid var(--accent);
+}
+
+.modal-hint {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  margin: 0.5rem 0 0;
+}
+
+.modal-hint a {
+  color: var(--accent);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  margin-right: auto;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #0a0a0c;
+  border: 1px solid var(--accent);
+  font-weight: 600;
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
