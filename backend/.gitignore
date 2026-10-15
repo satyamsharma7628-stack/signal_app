@@ -1,9 +1,0 @@
-.env
-venv/
-.venv/
-__pycache__/
-*.pyc
-output/
-summaries_cache.db
-signal.db
-
