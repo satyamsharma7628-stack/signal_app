@@ -1,0 +1,41 @@
+name: Send Signal Newsletters (Daily Top 10 & Weekly Playbook)
+
+on:
+  schedule:
+    # Daily Top 10 every day at 02:30 UTC (8:00 AM IST)
+    - cron: '30 2 * * *'
+    # Weekly "How to Use It" Playbook every Sunday at 03:30 UTC (9:00 AM IST)
+    - cron: '30 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: 'Newsletter type to send (daily or weekly)'
+        required: true
+        default: 'daily'
+
+jobs:
+  send-newsletter:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake backend & trigger newsletter dispatch
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          if [ -z "$BACKEND_URL" ]; then
+            echo "BACKEND_URL secret not set yet -- skipping"
+            exit 0
+          fi
+          # Wake up Render instance if sleeping
+          curl -sS --retry 5 --retry-delay 10 --max-time 60 "$BACKEND_URL/api/health" || true
+          
+          # Determine whether to trigger daily or weekly
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            KIND="${{ github.event.inputs.kind }}"
+          elif [ "${{ github.event.schedule }}" = "30 3 * * 0" ]; then
+            KIND="weekly"
+          else
+            KIND="daily"
+          fi
+          
+          echo "Triggering $KIND newsletter dispatch..."
+          curl -sS -X POST --max-time 60 "$BACKEND_URL/api/newsletter/dispatch?kind=$KIND"
