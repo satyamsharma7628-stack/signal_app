@@ -373,63 +373,95 @@ def _html_to_plain_text(html_body: str) -> str:
 
 
 def send_email_zero_cost(to_email: str, subject: str, html_body: str) -> dict:
-    """Sends both HTML + plain-text email over HTTPS (port 443) or SMTP."""
-    gmail_webhook = os.environ.get("GMAIL_WEBHOOK_URL")
-    smtp_email = os.environ.get("SMTP_EMAIL")
-    smtp_password = os.environ.get("SMTP_APP_PASSWORD")
-    brevo_key = os.environ.get("BREVO_API_KEY")
-    resend_key = os.environ.get("RESEND_API_KEY")
-    sender_email = os.environ.get("SENDER_EMAIL") or smtp_email or "onboarding@resend.dev"
+    """Sends both HTML + plain-text email over HTTPS (port 443) with automatic fallback
+    across configured providers (Brevo HTTPS API -> Google Apps Script Webhook -> Resend -> SMTP).
+    """
+    gmail_webhook = (os.environ.get("GMAIL_WEBHOOK_URL") or "").strip()
+    smtp_email = (os.environ.get("SMTP_EMAIL") or "").strip()
+    smtp_password = (os.environ.get("SMTP_APP_PASSWORD") or "").strip()
+    brevo_key = (os.environ.get("BREVO_API_KEY") or "").strip()
+    resend_key = (os.environ.get("RESEND_API_KEY") or "").strip()
+    sender_email = (os.environ.get("SENDER_EMAIL") or smtp_email or to_email).strip()
 
     plain_body = _html_to_plain_text(html_body)
+    errors = []
 
-    if gmail_webhook:
-        resp = requests.post(
-            gmail_webhook.strip(),
-            json={
-                "to": to_email,
-                "subject": subject,
-                "text": plain_body,
-                "html": html_body,
-                "htmlBody": html_body,
-            },
-            timeout=20,
-        )
-        resp.raise_for_status()
-        return {"sent": True, "provider": "gmail_https_webhook", "to": to_email}
-
+    # 1. Try Brevo HTTPS API (port 443 - 300 free emails/day)
     if brevo_key:
-        resp = requests.post(
-            "https://api.brevo.com/v3/smtp/email",
-            headers={"api-key": brevo_key, "Content-Type": "application/json"},
-            json={
-                "sender": {"name": "Signal Digest", "email": sender_email},
-                "to": [{"email": to_email}],
-                "subject": subject,
-                "textContent": plain_body,
-                "htmlContent": html_body,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return {"sent": True, "provider": "brevo", "to": to_email}
+        try:
+            resp = requests.post(
+                "https://api.brevo.com/v3/smtp/email",
+                headers={
+                    "api-key": brevo_key,
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                },
+                json={
+                    "sender": {"name": "Signal Digest", "email": sender_email},
+                    "to": [{"email": to_email}],
+                    "subject": subject,
+                    "textContent": plain_body,
+                    "htmlContent": html_body,
+                },
+                timeout=15,
+            )
+            if resp.ok:
+                return {"sent": True, "provider": "brevo", "to": to_email}
+            errors.append(f"Brevo ({resp.status_code}): {resp.text[:200]}")
+        except Exception as e:
+            errors.append(f"Brevo error: {e}")
 
+    # 2. Try Google Apps Script HTTPS Webhook (port 443 - 100 free Gmail sends/day)
+    if gmail_webhook:
+        try:
+            resp = requests.post(
+                gmail_webhook,
+                json={
+                    "to": to_email,
+                    "subject": subject,
+                    "text": plain_body,
+                    "html": html_body,
+                    "htmlBody": html_body,
+                },
+                timeout=20,
+            )
+            # Verify Google Apps Script actually returned JSON {"sent": true} and not an HTML error/login page
+            data = {}
+            try:
+                data = resp.json()
+            except Exception:
+                pass
+            if resp.ok and data.get("sent") is True:
+                return {"sent": True, "provider": "gmail_https_webhook", "to": to_email}
+            snippet = (resp.text or "")[:180].replace("\n", " ")
+            errors.append(
+                f"Google Apps Script webhook did not confirm send (make sure you pressed Ctrl+S before Deploy -> New deployment with access set to Anyone). Response: {snippet}"
+            )
+        except Exception as e:
+            errors.append(f"Google Apps Script error: {e}")
+
+    # 3. Try Resend HTTPS API (port 443)
     if resend_key:
-        resp = requests.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
-            json={
-                "from": f"Signal Digest <{sender_email}>",
-                "to": [to_email],
-                "subject": subject,
-                "text": plain_body,
-                "html": html_body,
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return {"sent": True, "provider": "resend", "to": to_email}
+        try:
+            resp = requests.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {resend_key}", "Content-Type": "application/json"},
+                json={
+                    "from": f"Signal Digest <{os.environ.get('SENDER_EMAIL') or 'onboarding@resend.dev'}>",
+                    "to": [to_email],
+                    "subject": subject,
+                    "text": plain_body,
+                    "html": html_body,
+                },
+                timeout=15,
+            )
+            if resp.ok:
+                return {"sent": True, "provider": "resend", "to": to_email}
+            errors.append(f"Resend ({resp.status_code}): {resp.text[:200]}")
+        except Exception as e:
+            errors.append(f"Resend error: {e}")
 
+    # 4. Fallback to Gmail SMTP (works locally/GitHub Actions; blocked on Render Free Tier)
     if smtp_email and smtp_password:
         try:
             msg = MIMEMultipart("alternative")
@@ -438,22 +470,23 @@ def send_email_zero_cost(to_email: str, subject: str, html_body: str) -> dict:
             msg["To"] = to_email
             msg.attach(MIMEText(plain_body, "plain", "utf-8"))
             msg.attach(MIMEText(html_body, "html", "utf-8"))
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=8) as server:
                 server.login(smtp_email, smtp_password)
                 server.sendmail(smtp_email, [to_email], msg.as_string())
             return {"sent": True, "provider": "gmail_smtp", "to": to_email}
         except Exception as smtp_err:
-            raise RuntimeError(
-                f"SMTP connection blocked ({smtp_err}). Render Free Tier blocks port 465—add GMAIL_WEBHOOK_URL (Google Apps Script) in Render Environment Variables."
-            )
+            errors.append(f"SMTP port 465 blocked on Render Free Tier ({smtp_err})")
+
+    if errors:
+        raise RuntimeError(" | ".join(errors))
 
     return {
         "sent": False,
         "provider": "none_configured",
         "to": to_email,
         "message": (
-            "Email preview is ready! To send to your Gmail inbox from Render Free Tier, "
-            "set GMAIL_WEBHOOK_URL (Google Apps Script) or BREVO_API_KEY in Render Environment Variables."
+            "No HTTPS email provider configured yet. Set BREVO_API_KEY + SENDER_EMAIL "
+            "or GMAIL_WEBHOOK_URL in Render Environment Variables."
         ),
     }
 
