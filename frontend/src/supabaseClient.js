@@ -1,6 +1,6 @@
 // Zero-dependency Supabase Auth (GoTrue) client using native browser fetch().
-// Keeps package.json 100% free of extra npm packages so Cloudflare Pages `npm ci`
-// never fails on lockfile mismatches.
+// Automatically refreshes expired 1-hour access_tokens using refresh_token so
+// "Save to my section" and "Add note / edit" never fail after an hour.
 
 const rawUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim().replace(/\/+$/, '')
 const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim()
@@ -51,7 +51,28 @@ function readStoredSession() {
   }
 }
 
-// Check URL hash for OAuth callback tokens (#access_token=...&refresh_token=...)
+function isSessionExpired(session) {
+  if (!session || !session.access_token) return true
+  if (session.expires_at) {
+    const nowSec = Math.floor(Date.now() / 1000)
+    // Refresh if within 120 seconds of expiry
+    if (nowSec >= Number(session.expires_at) - 120) {
+      return true
+    }
+  }
+  // Also check JWT exp claim directly
+  try {
+    const parts = session.access_token.split('.')
+    if (parts.length === 3) {
+      const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
+      if (payload.exp && Math.floor(Date.now() / 1000) >= payload.exp - 120) {
+        return true
+      }
+    }
+  } catch {}
+  return false
+}
+
 function consumeHashSession() {
   if (typeof window === 'undefined' || !window.location.hash) return null
   const hash = window.location.hash.substring(1)
@@ -70,7 +91,6 @@ function consumeHashSession() {
   }
   saveSession(session)
 
-  // Clean hash from address bar
   try {
     window.history.replaceState(null, '', window.location.pathname + window.location.search)
   } catch {}
@@ -95,6 +115,29 @@ async function authFetch(path, options = {}) {
   return data
 }
 
+async function refreshStoredSession(stored) {
+  if (!stored?.refresh_token) return stored
+  try {
+    const data = await authFetch('/token?grant_type=refresh_token', {
+      method: 'POST',
+      body: JSON.stringify({ refresh_token: stored.refresh_token }),
+    })
+    const refreshed = {
+      ...stored,
+      ...data,
+      expires_at:
+        data.expires_at ||
+        Math.floor(Date.now() / 1000) + parseInt(data.expires_in || '3600', 10),
+    }
+    saveSession(refreshed)
+    notifyListeners('TOKEN_REFRESHED', refreshed)
+    return refreshed
+  } catch (err) {
+    console.warn('Could not refresh Supabase token:', err)
+    return stored
+  }
+}
+
 export const supabase = isSupabaseConfigured
   ? {
       auth: {
@@ -104,8 +147,17 @@ export const supabase = isSupabaseConfigured
             setTimeout(() => notifyListeners('SIGNED_IN', fromHash), 0)
             return { data: { session: fromHash }, error: null }
           }
-          const stored = readStoredSession()
+          let stored = readStoredSession()
+          if (stored && isSessionExpired(stored) && stored.refresh_token) {
+            stored = await refreshStoredSession(stored)
+          }
           return { data: { session: stored }, error: null }
+        },
+
+        async refreshSession() {
+          const stored = readStoredSession()
+          if (!stored) return null
+          return await refreshStoredSession(stored)
         },
 
         onAuthStateChange(callback) {
@@ -134,9 +186,15 @@ export const supabase = isSupabaseConfigured
               method: 'POST',
               body: JSON.stringify({ email, password }),
             })
-            saveSession(data)
-            notifyListeners('SIGNED_IN', data)
-            return { data: { session: data, user: data.user }, error: null }
+            const session = {
+              ...data,
+              expires_at:
+                data.expires_at ||
+                Math.floor(Date.now() / 1000) + parseInt(data.expires_in || '3600', 10),
+            }
+            saveSession(session)
+            notifyListeners('SIGNED_IN', session)
+            return { data: { session, user: data.user }, error: null }
           } catch (error) {
             return { data: null, error }
           }
