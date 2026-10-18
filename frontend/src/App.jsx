@@ -67,7 +67,15 @@ export default function App() {
     try {
       const res = await getMe()
       setUserProfile(res.profile)
-      setSavedItems(res.saved_items || [])
+      const serverSaved = res.saved_items || []
+      const localSaved = loadLocalSavedBackup(res.profile?.user_id)
+      const mergedMap = new Map()
+      ;[...serverSaved, ...localSaved].forEach((row) => {
+        if (row?.item_url && !mergedMap.has(row.item_url)) {
+          mergedMap.set(row.item_url, row)
+        }
+      })
+      setSavedItems(Array.from(mergedMap.values()))
     } catch (err) {
       console.warn('Session check failed:', err)
       setAuthToken('')
@@ -157,18 +165,77 @@ export default function App() {
     setUserProfile(res.profile)
   }
 
+  function persistLocalSavedBackup(userId, list) {
+    if (!userId) return
+    try {
+      localStorage.setItem(`signal_saved_${userId}`, JSON.stringify(list))
+    } catch {}
+  }
+
+  function loadLocalSavedBackup(userId) {
+    if (!userId) return []
+    try {
+      const raw = localStorage.getItem(`signal_saved_${userId}`)
+      return raw ? JSON.parse(raw) : []
+    } catch {
+      return []
+    }
+  }
+
   async function handleSaveOrUpdateItem(item, customNote, editedSummary) {
-    const res = await saveUserItem(item, customNote, editedSummary)
-    const updated = res.saved_item
+    const itemUrl = item.url || item.item_url
+    const nowIso = new Date().toISOString()
+    const optimisticRow = {
+      user_id: userProfile?.user_id || 'local',
+      item_url: itemUrl,
+      title: item.title || '',
+      source: item.source || '',
+      category: item.category || '',
+      summary: editedSummary !== undefined ? editedSummary : (item.summary || ''),
+      custom_note: customNote || '',
+      dept: item.dept || [],
+      stack_tags: item.stack_tags || [],
+      saved_at: item.saved_at || nowIso,
+      updated_at: nowIso,
+    }
+
+    // Update UI & local backup immediately so the button responds in <10ms
     setSavedItems((prev) => {
-      const filtered = prev.filter((x) => x.item_url !== updated.item_url)
-      return [updated, ...filtered]
+      const next = [optimisticRow, ...prev.filter((x) => x.item_url !== itemUrl)]
+      persistLocalSavedBackup(userProfile?.user_id, next)
+      return next
     })
+
+    // Sync to backend (refreshing token first if needed)
+    try {
+      if (isSupabaseConfigured && supabase?.auth?.refreshSession) {
+        const refreshed = await supabase.auth.refreshSession()
+        if (refreshed?.access_token) setAuthToken(refreshed.access_token)
+      }
+      const res = await saveUserItem(item, customNote, editedSummary)
+      if (res?.saved_item) {
+        setSavedItems((prev) => {
+          const next = [res.saved_item, ...prev.filter((x) => x.item_url !== itemUrl)]
+          persistLocalSavedBackup(userProfile?.user_id, next)
+          return next
+        })
+      }
+    } catch (err) {
+      console.warn('Backend sync warning (saved locally):', err)
+    }
   }
 
   async function handleRemoveSavedItem(itemUrl) {
-    await removeSavedItem(itemUrl)
-    setSavedItems((prev) => prev.filter((x) => x.item_url !== itemUrl))
+    setSavedItems((prev) => {
+      const next = prev.filter((x) => x.item_url !== itemUrl)
+      persistLocalSavedBackup(userProfile?.user_id, next)
+      return next
+    })
+    try {
+      await removeSavedItem(itemUrl)
+    } catch (err) {
+      console.warn('Backend delete warning:', err)
+    }
   }
 
   async function loadAll() {
