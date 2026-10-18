@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { getSummary } from '../api'
 
 const DEPT_META = {
@@ -27,9 +27,18 @@ export default function FeedRow({
   const [noteDraft, setNoteDraft] = useState(savedEntry?.custom_note || '')
   const [summaryDraft, setSummaryDraft] = useState(savedEntry?.summary || item.summary || '')
   const [savingItem, setSavingItem] = useState(false)
+  const [actionFeedback, setActionFeedback] = useState('')
 
   const itemUrl = item.url || item.item_url
   const isSaved = Boolean(savedEntry)
+
+  useEffect(() => {
+    if (savedEntry) {
+      setNoteDraft(savedEntry.custom_note || '')
+      setSummaryDraft(savedEntry.summary || item.summary || '')
+    }
+  }, [savedEntry, item.summary])
+
   const pubDate = (item.published_at || item.saved_at)
     ? new Date(item.published_at || item.saved_at).toLocaleDateString(undefined, {
         month: 'short',
@@ -56,25 +65,40 @@ export default function FeedRow({
     }
   }
 
-  async function handleToggleBookmark() {
+  async function handleToggleBookmark(e) {
+    e.preventDefault()
+    e.stopPropagation()
     if (!isAuthenticated) return
     setSavingItem(true)
+    setActionFeedback('')
     try {
       if (isSaved) {
         await onRemoveSaved(itemUrl)
+        setActionFeedback('Removed from your saved section.')
       } else {
-        await onSaveOrUpdate(item, noteDraft, summaryDraft)
+        await onSaveOrUpdate(item, noteDraft, summaryDraft || item.summary || '')
+        setActionFeedback('Saved to 🔖 Saved & Notes!')
       }
+      setTimeout(() => setActionFeedback(''), 3000)
+    } catch (err) {
+      setActionFeedback(err.message || 'Could not save item.')
     } finally {
       setSavingItem(false)
     }
   }
 
-  async function handleSaveEdits() {
+  async function handleSaveEdits(e) {
+    e.preventDefault()
+    e.stopPropagation()
     setSavingItem(true)
+    setActionFeedback('')
     try {
       await onSaveOrUpdate(item, noteDraft, summaryDraft)
       setEditingNote(false)
+      setActionFeedback('Note & custom summary saved!')
+      setTimeout(() => setActionFeedback(''), 3000)
+    } catch (err) {
+      setActionFeedback(err.message || 'Could not save note.')
     } finally {
       setSavingItem(false)
     }
@@ -143,22 +167,31 @@ export default function FeedRow({
       </div>
 
       <div className="row-actions-bar">
-        <button className="summary-toggle" onClick={handleExpand}>
+        <button type="button" className="summary-toggle" onClick={handleExpand}>
           {expanded ? '▾' : '▸'} {expanded ? 'Hide 50w AI summary' : 'View 50w AI summary'}
         </button>
 
         {isAuthenticated && (
           <div className="user-item-actions">
+            {actionFeedback && (
+              <span style={{ fontSize: '0.72rem', color: 'var(--good)', fontFamily: 'var(--mono)' }}>
+                {actionFeedback}
+              </span>
+            )}
             <button
+              type="button"
               className={`summary-toggle ${isSaved ? 'active-bookmark' : ''}`}
               onClick={handleToggleBookmark}
               disabled={savingItem}
             >
-              {isSaved ? '★ Saved' : '☆ Save to my section'}
+              {savingItem ? 'Saving…' : isSaved ? '★ Saved' : '☆ Save to my section'}
             </button>
             <button
+              type="button"
               className="summary-toggle"
-              onClick={() => {
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
                 setNoteDraft(savedEntry?.custom_note || '')
                 setSummaryDraft(savedEntry?.summary || item.summary || '')
                 setEditingNote(!editingNote)
@@ -171,7 +204,7 @@ export default function FeedRow({
       </div>
 
       {editingNote && isAuthenticated && (
-        <div className="edit-note-panel">
+        <div className="edit-note-panel" onClick={(e) => e.stopPropagation()}>
           <label className="edit-label">Personal note / builder takeaway:</label>
           <textarea
             className="modal-input"
@@ -179,6 +212,7 @@ export default function FeedRow({
             placeholder="Add your own note, idea twist, or action item…"
             value={noteDraft}
             onChange={(e) => setNoteDraft(e.target.value)}
+            autoFocus
           />
           <label className="edit-label" style={{ marginTop: '0.5rem' }}>
             Custom summary override (saved to your section):
@@ -191,10 +225,10 @@ export default function FeedRow({
             onChange={(e) => setSummaryDraft(e.target.value)}
           />
           <div className="edit-actions">
-            <button className="btn" onClick={() => setEditingNote(false)}>
+            <button type="button" className="btn" onClick={() => setEditingNote(false)}>
               Cancel
             </button>
-            <button className="btn btn-primary" onClick={handleSaveEdits} disabled={savingItem}>
+            <button type="button" className="btn btn-primary" onClick={handleSaveEdits} disabled={savingItem}>
               {savingItem ? 'Saving…' : 'Save changes'}
             </button>
           </div>
