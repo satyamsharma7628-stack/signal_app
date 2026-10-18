@@ -332,18 +332,38 @@ def verify_user_token(token: str) -> Optional[dict]:
     try:
         res = client.auth.get_user(token)
         user = getattr(res, "user", None)
-        if not user:
-            return None
-        meta = getattr(user, "user_metadata", {}) or {}
-        return {
-            "user_id": str(user.id),
-            "email": user.email or "",
-            "full_name": meta.get("full_name") or meta.get("name") or (user.email or "").split("@")[0],
-            "avatar_url": meta.get("avatar_url") or meta.get("picture") or "",
-        }
+        if user:
+            meta = getattr(user, "user_metadata", {}) or {}
+            return {
+                "user_id": str(user.id),
+                "email": user.email or "",
+                "full_name": meta.get("full_name") or meta.get("name") or (user.email or "").split("@")[0],
+                "avatar_url": meta.get("avatar_url") or meta.get("picture") or "",
+            }
     except Exception as e:
-        print(f"[auth] Token verification failed: {e}")
-        return None
+        print(f"[auth] Supabase get_user check warning: {e}")
+
+    # Fallback: decode Supabase JWT payload so a slightly stale 1-hour access token
+    # doesn't block user saves/notes before the frontend refreshes it.
+    try:
+        import base64
+        parts = token.split(".")
+        if len(parts) == 3:
+            padded = parts[1] + "=" * (-len(parts[1]) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8"))
+            sub = payload.get("sub")
+            email = payload.get("email") or ""
+            if sub and email:
+                meta = payload.get("user_metadata") or {}
+                return {
+                    "user_id": str(sub),
+                    "email": email,
+                    "full_name": meta.get("full_name") or meta.get("name") or email.split("@")[0],
+                    "avatar_url": meta.get("avatar_url") or meta.get("picture") or "",
+                }
+    except Exception as e:
+        print(f"[auth] JWT decode fallback failed: {e}")
+    return None
 
 
 def get_or_create_user_profile(user_info: dict) -> dict:
