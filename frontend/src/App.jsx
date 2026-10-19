@@ -21,6 +21,8 @@ import { supabase, isSupabaseConfigured } from './supabaseClient'
 const PAGE_SIZE = 12
 const DEMO_TOKEN_KEY = 'signal_demo_auth_token'
 const CHAT_HISTORY_KEY = 'signal_ai_chat_threads_v1'
+const LOCAL_NICHES_KEY = 'signal_preferred_depts_backup'
+const LOCAL_SAVED_FALLBACK_KEY = 'signal_saved_items_guest'
 
 const DEPT_META = {
   'cybersecurity':   { label: '🔒 Cybersecurity',   color: '#e07070' },
@@ -30,6 +32,47 @@ const DEPT_META = {
   'web-dev':         { label: '🌐 Web Dev',           color: '#ff8c1a' },
   'innovator':       { label: '🚀 Innovator',         color: '#f9c04a' },
   'random-dev-idea': { label: '🎲 Random Dev Idea',   color: '#8b8a85' },
+}
+
+function loadLocalNiches() {
+  try {
+    const raw = localStorage.getItem(LOCAL_NICHES_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function saveLocalNiches(depts) {
+  try {
+    localStorage.setItem(LOCAL_NICHES_KEY, JSON.stringify(depts || []))
+  } catch {}
+}
+
+function decodeJwtProfileFallback(token) {
+  if (!token || token.startsWith('demo:')) return null
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
+    if (!payload.sub) return null
+    const meta = payload.user_metadata || {}
+    const email = payload.email || ''
+    return {
+      user_id: String(payload.sub),
+      email,
+      full_name: meta.full_name || meta.name || email.split('@')[0] || 'User',
+      avatar_url: meta.avatar_url || meta.picture || '',
+      preferred_depts: loadLocalNiches(),
+      preferred_sources: [],
+      subscription_tier: 'free',
+      daily_newsletter: true,
+      weekly_newsletter: false,
+    }
+  } catch {
+    return null
+  }
 }
 
 function loadStoredChatThreads() {
@@ -67,9 +110,17 @@ export default function App() {
   const [retryInfo, setRetryInfo] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
 
-  // Auth & User state
+  // Auth, Niches & Saved Items state (initialized from localStorage so mobile works immediately)
   const [userProfile, setUserProfile] = useState(null)
-  const [savedItems, setSavedItems] = useState([])
+  const [localNiches, setLocalNiches] = useState(() => loadLocalNiches())
+  const [savedItems, setSavedItems] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LOCAL_SAVED_FALLBACK_KEY)
+      return raw ? JSON.parse(raw) : []
+    } catch {
+      return []
+    }
+  })
 
   // Active tab: 'feed' | 'ideas' | 'my-feed' | 'saved' | 'chat'
   const [activeTab, setActiveTab] = useState('feed')
@@ -95,6 +146,14 @@ export default function App() {
       localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(chatThreads))
     } catch {}
   }, [chatThreads])
+
+  const activeNiches = useMemo(
+    () =>
+      (userProfile?.preferred_depts && userProfile.preferred_depts.length > 0)
+        ? userProfile.preferred_depts
+        : localNiches,
+    [userProfile, localNiches]
+  )
 
   const activeThread = useMemo(
     () => chatThreads.find((t) => t.id === activeThreadId) || chatThreads[0],
@@ -238,17 +297,22 @@ export default function App() {
   }
 
   function persistLocalSavedBackup(userId, list) {
-    if (!userId) return
     try {
-      localStorage.setItem(`signal_saved_${userId}`, JSON.stringify(list))
+      localStorage.setItem(LOCAL_SAVED_FALLBACK_KEY, JSON.stringify(list))
+      if (userId) {
+        localStorage.setItem(`signal_saved_${userId}`, JSON.stringify(list))
+      }
     } catch {}
   }
 
   function loadLocalSavedBackup(userId) {
-    if (!userId) return []
     try {
-      const raw = localStorage.getItem(`signal_saved_${userId}`)
-      return raw ? JSON.parse(raw) : []
+      if (userId) {
+        const raw = localStorage.getItem(`signal_saved_${userId}`)
+        if (raw) return JSON.parse(raw)
+      }
+      const fallbackRaw = localStorage.getItem(LOCAL_SAVED_FALLBACK_KEY)
+      return fallbackRaw ? JSON.parse(fallbackRaw) : []
     } catch {
       return []
     }
@@ -258,13 +322,27 @@ export default function App() {
     if (!token) {
       setAuthToken('')
       setUserProfile(null)
-      setSavedItems([])
       return
     }
     setAuthToken(token)
+
+    // Immediately populate userProfile from JWT token so mobile never waits on Render cold-start
+    const instantProfile = decodeJwtProfileFallback(token)
+    if (instantProfile) {
+      setUserProfile((prev) => prev || instantProfile)
+      const cachedSaved = loadLocalSavedBackup(instantProfile.user_id)
+      if (cachedSaved.length > 0) setSavedItems(cachedSaved)
+    }
+
     try {
       const res = await getMe()
-      setUserProfile(res.profile)
+      if (res?.profile) {
+        setUserProfile(res.profile)
+        if (res.profile.preferred_depts?.length > 0) {
+          setLocalNiches(res.profile.preferred_depts)
+          saveLocalNiches(res.profile.preferred_depts)
+        }
+      }
       const serverSaved = res.saved_items || []
       const localSaved = loadLocalSavedBackup(res.profile?.user_id)
       const mergedMap = new Map()
@@ -273,12 +351,11 @@ export default function App() {
           mergedMap.set(row.item_url, row)
         }
       })
-      setSavedItems(Array.from(mergedMap.values()))
+      const mergedList = Array.from(mergedMap.values())
+      setSavedItems(mergedList)
+      persistLocalSavedBackup(res.profile?.user_id, mergedList)
     } catch (err) {
-      console.warn('Session check failed:', err)
-      setAuthToken('')
-      setUserProfile(null)
-      setSavedItems([])
+      console.warn('Backend profile sync warning (using local session fallback):', err)
     }
   }
 
@@ -352,15 +429,27 @@ export default function App() {
     } catch {}
     setAuthToken('')
     setUserProfile(null)
-    setSavedItems([])
-    if (activeTab === 'my-feed' || activeTab === 'saved') {
-      setActiveTab('feed')
-    }
   }
 
   async function handleSaveNiches(depts) {
-    const res = await updatePreferences(depts, userProfile?.preferred_sources || [])
-    setUserProfile(res.profile)
+    setLocalNiches(depts)
+    saveLocalNiches(depts)
+    if (userProfile) {
+      setUserProfile((prev) => (prev ? { ...prev, preferred_depts: depts } : prev))
+      try {
+        const res = await updatePreferences(depts, userProfile?.preferred_sources || [])
+        if (res?.profile) setUserProfile(res.profile)
+      } catch (err) {
+        console.warn('Saved niches locally; backend sync warning:', err)
+      }
+    }
+  }
+
+  function toggleQuickNiche(slug) {
+    const next = activeNiches.includes(slug)
+      ? activeNiches.filter((d) => d !== slug)
+      : [...activeNiches, slug]
+    handleSaveNiches(next)
   }
 
   async function handleSaveOrUpdateItem(item, customNote, editedSummary) {
@@ -386,6 +475,8 @@ export default function App() {
       return next
     })
 
+    if (!userProfile) return
+
     try {
       if (isSupabaseConfigured && supabase?.auth?.refreshSession) {
         const refreshed = await supabase.auth.refreshSession()
@@ -410,6 +501,7 @@ export default function App() {
       persistLocalSavedBackup(userProfile?.user_id, next)
       return next
     })
+    if (!userProfile) return
     try {
       await removeSavedItem(itemUrl)
     } catch (err) {
@@ -479,9 +571,8 @@ export default function App() {
       return items.filter((i) => i.is_builder_idea)
     }
     if (activeTab === 'my-feed') {
-      const prefDepts = userProfile?.preferred_depts || []
-      if (prefDepts.length === 0) return items
-      return items.filter((i) => (i.dept || []).some((d) => prefDepts.includes(d)))
+      if (activeNiches.length === 0) return items
+      return items.filter((i) => (i.dept || []).some((d) => activeNiches.includes(d)))
     }
     if (activeTab === 'saved') {
       return savedItems.map((s) => ({
@@ -491,7 +582,7 @@ export default function App() {
       }))
     }
     return items
-  }, [items, savedItems, activeTab, userProfile])
+  }, [items, savedItems, activeTab, activeNiches])
 
   const sourceOptions = useMemo(
     () => Array.from(new Set(baseItems.map((i) => i.source).filter(Boolean))).sort(),
@@ -620,7 +711,8 @@ export default function App() {
         <>
           <KpiStrip items={items} />
 
-          <div className="tabs" style={{ flexWrap: 'wrap' }}>
+          {/* Always-visible tabs across desktop & mobile */}
+          <div className="tabs">
             <button
               className={`tab ${activeTab === 'feed' ? 'active' : ''}`}
               onClick={() => switchTab('feed')}
@@ -633,24 +725,18 @@ export default function App() {
             >
               Builder ideas
             </button>
-            {userProfile && (
-              <>
-                <button
-                  className={`tab ${activeTab === 'my-feed' ? 'active' : ''}`}
-                  onClick={() => switchTab('my-feed')}
-                >
-                  ✨ My Feed
-                  {(userProfile.preferred_depts || []).length > 0 &&
-                    ` (${userProfile.preferred_depts.length})`}
-                </button>
-                <button
-                  className={`tab ${activeTab === 'saved' ? 'active' : ''}`}
-                  onClick={() => switchTab('saved')}
-                >
-                  🔖 Saved &amp; Notes ({savedItems.length})
-                </button>
-              </>
-            )}
+            <button
+              className={`tab ${activeTab === 'my-feed' ? 'active' : ''}`}
+              onClick={() => switchTab('my-feed')}
+            >
+              ✨ My Feed {activeNiches.length > 0 ? `(${activeNiches.length})` : ''}
+            </button>
+            <button
+              className={`tab ${activeTab === 'saved' ? 'active' : ''}`}
+              onClick={() => switchTab('saved')}
+            >
+              🔖 Saved &amp; Notes ({savedItems.length})
+            </button>
             <button
               className={`tab ${activeTab === 'chat' ? 'active' : ''}`}
               onClick={() => switchTab('chat')}
@@ -775,28 +861,31 @@ export default function App() {
                 </p>
               )}
 
-              {activeTab === 'my-feed' && userProfile && (
-                <p className="tab-caption">
-                  {(userProfile.preferred_depts || []).length > 0 ? (
-                    <>
-                      Showing drops matching your saved niches:{' '}
-                      <b>
-                        {userProfile.preferred_depts
-                          .map((d) => DEPT_META[d]?.label || d)
-                          .join(', ')}
-                      </b>
-                      . Use <b>🎯 My Niches</b> in the top bar anytime to change them.
-                    </>
-                  ) : (
-                    <>
-                      You haven&apos;t picked any niche sections yet — click <b>🎯 My Niches</b> in the
-                      top bar to choose your favorite tech departments.
-                    </>
-                  )}
-                </p>
+              {activeTab === 'my-feed' && (
+                <div style={{ marginBottom: '0.75rem' }}>
+                  <p className="tab-caption" style={{ marginBottom: '0.45rem' }}>
+                    Tap the niches below to customize your personal feed (syncs to your account when signed in):
+                  </p>
+                  <div className="dept-bar">
+                    {Object.entries(DEPT_META).map(([slug, { label, color }]) => {
+                      const selected = activeNiches.includes(slug)
+                      return (
+                        <button
+                          key={slug}
+                          type="button"
+                          className={`dept-pill ${selected ? 'active' : ''}`}
+                          style={selected ? { borderColor: color, color } : {}}
+                          onClick={() => toggleQuickNiche(slug)}
+                        >
+                          {label} {selected ? '✓' : '+'}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
               )}
 
-              {activeTab === 'saved' && userProfile && (
+              {activeTab === 'saved' && (
                 <p className="tab-caption">
                   Your personal vault of saved articles, builder ideas, and custom notes/summaries.
                 </p>
@@ -869,7 +958,7 @@ export default function App() {
               {visible.length === 0 ? (
                 <div className="empty-state">
                   {activeTab === 'saved'
-                    ? 'You have not saved any items yet. Click "☆ Save to my section" on any card to bookmark it.'
+                    ? 'You have not saved any items yet. Tap "☆ Save to my section" on any card to bookmark it.'
                     : 'No items match these filters. Try clearing search or switching sources.'}
                 </div>
               ) : (
@@ -877,7 +966,7 @@ export default function App() {
                   <FeedRow
                     item={item}
                     key={item.url || item.item_url}
-                    isAuthenticated={Boolean(userProfile)}
+                    isAuthenticated={true}
                     savedEntry={savedByUrl[item.url || item.item_url]}
                     onSaveOrUpdate={handleSaveOrUpdateItem}
                     onRemoveSaved={handleRemoveSavedItem}
