@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 
 from tech_digest.fetch_all import run as run_fetch
 from tech_digest.cache import get_cached_summary, save_summary_to_cache
-from tech_digest.summarizer import summarize_article
+from tech_digest.summarizer import summarize_article, find_nearby_connected_items, generate_idea_network_blueprint
 from tech_digest import db, newsletter
 
 app = FastAPI(title="Signal API")
@@ -332,6 +332,61 @@ def dispatch_newsletter(
 ):
     background_tasks.add_task(newsletter.dispatch_newsletter_batch, kind)
     return {"status": "dispatch_started", "kind": kind}
+
+
+
+
+class IdeateNetworkRequest(BaseModel):
+    url: str
+    title: str
+    category: str = "tech"
+    summary: str = ""
+    dept: list[str] = Field(default_factory=list)
+    stack_tags: list[str] = Field(default_factory=list)
+    education_level: str = "CS / Engineering Undergrad"
+    builder_goal: str = "Weekend Hackathon / Resume Project"
+    user_background: str = ""
+    creativity_mode: str = "mashup"
+    gemini_api_key: Optional[str] = None
+
+
+@app.post("/api/ideate")
+def post_ideate_network(req: IdeateNetworkRequest):
+    try:
+        all_items = db.load_items()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not load items for network: {e}")
+
+    connected_nodes = find_nearby_connected_items(
+        anchor_url=req.url,
+        anchor_title=req.title,
+        anchor_depts=req.dept,
+        anchor_stacks=req.stack_tags,
+        all_items=all_items,
+        max_nodes=4,
+    )
+
+    blueprint_html = generate_idea_network_blueprint(
+        anchor_item={
+            "url": req.url,
+            "title": req.title,
+            "category": req.category,
+            "summary": req.summary,
+            "dept": req.dept,
+            "stack_tags": req.stack_tags,
+        },
+        connected_nodes=connected_nodes,
+        education_level=req.education_level,
+        builder_goal=req.builder_goal,
+        user_background=req.user_background,
+        creativity_mode=req.creativity_mode,
+        api_key=req.gemini_api_key or os.environ.get("GEMINI_API_KEY"),
+    )
+
+    return {
+        "connected_nodes": connected_nodes,
+        "blueprint_html": blueprint_html,
+    }
 
 
 @app.get("/api/health")
