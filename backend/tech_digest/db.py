@@ -281,7 +281,13 @@ def _item_to_row(item: NewsItem) -> dict:
     return row
 
 
+_items_mem_cache: list[dict] = []
+_items_mem_cache_ts: float = 0.0
+ITEMS_CACHE_TTL_SEC = 60.0
+
+
 def save_items(items: list[NewsItem]) -> int:
+    global _items_mem_cache, _items_mem_cache_ts
     if not items:
         return 0
     client = get_client()
@@ -292,10 +298,22 @@ def save_items(items: list[NewsItem]) -> int:
         chunk = rows[i:i + CHUNK]
         client.table("items").upsert(chunk, on_conflict="url").execute()
         saved += len(chunk)
+    # Invalidate in-memory cache on write
+    _items_mem_cache = []
+    _items_mem_cache_ts = 0.0
     return saved
 
 
 def load_items() -> list[dict]:
+    """Reads back every item, newest first, with a 60-second in-memory cache
+    so /api/ideate, /api/items, and /api/status respond in <5ms instead of
+    downloading 1,000+ rows from Supabase on every click."""
+    global _items_mem_cache, _items_mem_cache_ts
+    import time as _time
+    now = _time.time()
+    if _items_mem_cache and (now - _items_mem_cache_ts) < ITEMS_CACHE_TTL_SEC:
+        return _items_mem_cache
+
     client = get_client()
     result = (
         client.table("items")
@@ -304,7 +322,11 @@ def load_items() -> list[dict]:
         .limit(2000)
         .execute()
     )
-    return result.data or []
+    data = result.data or []
+    if data:
+        _items_mem_cache = data
+        _items_mem_cache_ts = now
+    return data
 
 
 # ── User Authentication & Personal Section Helpers ──────────────────────────
