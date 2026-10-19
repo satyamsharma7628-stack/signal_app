@@ -1,394 +1,234 @@
-"""
-FastAPI backend for Signal.
-Endpoints:
-  GET    /api/items               -> latest enriched items (the feed)
-  GET    /api/status              -> last fetch time, per-source counts, in-progress flag
-  POST   /api/refresh             -> triggers a fetch in the background (used by cron)
-  POST   /api/summary             -> on-demand 50-word AI summary for one item (cached)
-  GET    /api/me                  -> authenticated user's profile & saved items
-  PUT    /api/me/preferences      -> save user's niche departments & preferred sources
-  PUT    /api/me/newsletter       -> toggle Daily Top 10 & Weekly AI Playbook subscriptions
-  GET    /api/me/saved            -> list user's saved items & custom notes
-  POST   /api/me/saved            -> save or edit a bookmarked item / custom note
-  DELETE /api/me/saved            -> remove a bookmarked item
-  GET    /api/newsletter/preview  -> preview Daily Top 10 or Weekly AI Playbook (cached)
-  POST   /api/newsletter/send-test-> send a test newsletter to the logged-in user's email
-  POST   /api/newsletter/dispatch -> cron endpoint to send daily/weekly newsletter to subscribers
-"""
-import os
-import time
-from typing import Optional
+// Centralizes every call to the FastAPI backend. Includes cold-start retry
+// logic and automatically attaches the user's Bearer token when signed in.
 
-from dotenv import load_dotenv
-load_dotenv()
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Header, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+let currentAuthToken = ''
 
-from tech_digest.fetch_all import run as run_fetch
-from tech_digest.cache import get_cached_summary, save_summary_to_cache
-from tech_digest.summarizer import summarize_article, find_nearby_connected_items, generate_idea_network_blueprint
-from tech_digest import db, newsletter
+export function setAuthToken(token) {
+  currentAuthToken = token || ''
+}
 
-app = FastAPI(title="Signal API")
+export function getAuthToken() {
+  return currentAuthToken
+}
 
-FRONTEND_ORIGINS = [
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "https://signal-app-asd.pages.dev",
-    "https://signal-app-asd.pages.dev/",
-]
-if os.environ.get("FRONTEND_ORIGIN"):
-    FRONTEND_ORIGINS.append(os.environ["FRONTEND_ORIGIN"].rstrip("/"))
+async function fetchWithRetry(path, options = {}, { retries = 4, onRetry } = {}) {
+  const url = `${API_BASE}${path}`
+  let lastError
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 20000)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-)
+      const headers = { ...(options.headers || {}) }
+      if (currentAuthToken) {
+        headers['Authorization'] = `Bearer ${currentAuthToken}`
+      }
 
-_state = {"fetching": False, "last_error": None, "last_fetch_started_at": None}
-
-
-def _run_fetch_job():
-    _state["fetching"] = True
-    _state["last_error"] = None
-    _state["last_fetch_started_at"] = time.time()
-    try:
-        run_fetch()
-    except Exception as e:
-        _state["last_error"] = str(e)
-        print(f"[refresh] fetch job failed: {e}")
-    finally:
-        _state["fetching"] = False
-
-
-def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Sign in required.")
-    token = authorization.split(" ", 1)[1].strip()
-    user_info = db.verify_user_token(token)
-    if not user_info:
-        raise HTTPException(status_code=401, detail="Invalid or expired login session.")
-    return user_info
-
-
-@app.get("/api/status")
-def get_status():
-    try:
-        items = db.load_items()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not reach database: {e}")
-
-    counts: dict[str, int] = {}
-    latest_updated = None
-    for item in items:
-        counts[item["source"]] = counts.get(item["source"], 0) + 1
-        updated = item.get("updated_at")
-        if updated and (latest_updated is None or updated > latest_updated):
-            latest_updated = updated
-
-    return {
-        "last_fetch_at": latest_updated,
-        "fetching": _state["fetching"],
-        "source_counts": counts,
-        "total_items": len(items),
-        "last_error": _state["last_error"],
+      const res = await fetch(url, {
+        ...options,
+        headers,
+        signal: controller.signal,
+      })
+      clearTimeout(timeout)
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.detail || `Request failed (${res.status})`)
+      }
+      return await res.json()
+    } catch (err) {
+      lastError = err
+      if (attempt < retries) {
+        onRetry?.(attempt + 1, retries)
+        await new Promise((r) => setTimeout(r, 2000 * Math.pow(2, attempt)))
+      }
     }
+  }
+  throw lastError
+}
 
+export function getStatus(onRetry) {
+  return fetchWithRetry('/api/status', {}, { onRetry })
+}
 
-@app.get("/api/items")
-def get_items(
-    builder_ideas_only: bool = False,
-    source: Optional[str] = None,
-    category: Optional[str] = None,
-    stack: Optional[str] = None,
-    search: Optional[str] = None,
-    sort: str = Query("newest", pattern="^(newest|oldest|engagement)$"),
-):
-    try:
-        items = db.load_items()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not reach database: {e}")
+export function getItems(params = {}, onRetry) {
+  const query = new URLSearchParams(
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v !== '' && v != null))
+  )
+  return fetchWithRetry(`/api/items?${query.toString()}`, {}, { onRetry })
+}
 
-    if builder_ideas_only:
-        items = [i for i in items if i.get("is_builder_idea")]
-    if source:
-        items = [i for i in items if i["source"] == source]
-    if category:
-        items = [i for i in items if i["category"] == category]
-    if stack:
-        items = [i for i in items if stack in (i.get("stack_tags") or [])]
-    if search:
-        q = search.lower()
-        items = [
-            i for i in items
-            if q in i["title"].lower()
-            or q in (i.get("summary") or "").lower()
-            or any(q in t.lower() for t in (i.get("stack_tags") or []))
-        ]
+export function triggerRefresh() {
+  return fetchWithRetry('/api/refresh', { method: 'POST' }, { retries: 1 })
+}
 
-    if sort == "oldest":
-        items.sort(key=lambda i: i.get("published_at") or "")
-    elif sort == "engagement":
-        items.sort(key=lambda i: i.get("engagement_raw") or 0, reverse=True)
+export function getSummary(item) {
+  let userKey = ''
+  try {
+    userKey = localStorage.getItem('signal_gemini_api_key') || ''
+  } catch {
+    // localStorage unavailable
+  }
 
-    return {"items": items, "total": len(items)}
+  return fetchWithRetry(
+    '/api/summary',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: item.url,
+        title: item.title,
+        category: item.category,
+        existing_summary: item.summary || '',
+        gemini_api_key: userKey || undefined,
+      }),
+    },
+    { retries: 1 }
+  )
+}
 
+// ── Authenticated User Endpoints ────────────────────────────────────────────
 
-@app.post("/api/refresh")
-def trigger_refresh(background_tasks: BackgroundTasks):
-    if _state["fetching"]:
-        return {"status": "already_running"}
-    background_tasks.add_task(_run_fetch_job)
-    return {"status": "started"}
+export function getMe() {
+  return fetchWithRetry('/api/me', {}, { retries: 1 })
+}
 
+export function updatePreferences(preferredDepts, preferredSources = []) {
+  return fetchWithRetry(
+    '/api/me/preferences',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        preferred_depts: preferredDepts,
+        preferred_sources: preferredSources,
+      }),
+    },
+    { retries: 1 }
+  )
+}
 
-class SummaryRequest(BaseModel):
-    url: str
-    title: str
-    category: str
-    existing_summary: str = ""
-    gemini_api_key: Optional[str] = None
+export function saveUserItem(item, customNote = '', editedSummary = undefined) {
+  return fetchWithRetry(
+    '/api/me/saved',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        item_url: item.url || item.item_url,
+        title: item.title,
+        source: item.source || '',
+        category: item.category || '',
+        summary: editedSummary !== undefined ? editedSummary : (item.summary || ''),
+        custom_note: customNote,
+        dept: item.dept || [],
+        stack_tags: item.stack_tags || [],
+      }),
+    },
+    { retries: 1 }
+  )
+}
 
+export function removeSavedItem(itemUrl) {
+  const q = new URLSearchParams({ item_url: itemUrl })
+  return fetchWithRetry(
+    `/api/me/saved?${q.toString()}`,
+    { method: 'DELETE' },
+    { retries: 1 }
+  )
+}
 
-@app.post("/api/summary")
-def get_summary(req: SummaryRequest):
-    using_own_key = bool(req.gemini_api_key)
+export function updateNewsletterPrefs(dailyNewsletter, weeklyNewsletter) {
+  return fetchWithRetry(
+    '/api/me/newsletter',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        daily_newsletter: Boolean(dailyNewsletter),
+        weekly_newsletter: Boolean(weeklyNewsletter),
+      }),
+    },
+    { retries: 1 }
+  )
+}
 
-    if not using_own_key:
-        cached = get_cached_summary(req.url)
-        if cached:
-            return {"summary": cached, "cached": True}
+export function getNewsletterPreview(kind = 'daily', forceRefresh = false) {
+  let userKey = ''
+  try {
+    userKey = localStorage.getItem('signal_gemini_api_key') || ''
+  } catch {}
+  const q = new URLSearchParams({ kind, force_refresh: String(forceRefresh) })
+  const headers = userKey ? { 'X-Gemini-Key': userKey } : {}
+  return fetchWithRetry(`/api/newsletter/preview?${q.toString()}`, { headers }, { retries: 1 })
+}
 
-    try:
-        generated = summarize_article(
-            url=req.url,
-            title=req.title,
-            category=req.category,
-            existing_summary=req.existing_summary,
-            api_key=req.gemini_api_key or os.environ.get("GEMINI_API_KEY"),
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Summary generation failed: {e}")
+export function sendTestNewsletter(kind = 'daily') {
+  let userKey = ''
+  try {
+    userKey = localStorage.getItem('signal_gemini_api_key') || ''
+  } catch {}
+  return fetchWithRetry(
+    '/api/newsletter/send-test',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        kind,
+        gemini_api_key: userKey || undefined,
+      }),
+    },
+    { retries: 1 }
+  )
+}
 
-    if not using_own_key:
-        save_summary_to_cache(req.url, generated)
+export function generateIdeaNetwork(item, profileInputs) {
+  let userKey = ''
+  try {
+    userKey = localStorage.getItem('signal_gemini_api_key') || ''
+  } catch {}
 
-    return {"summary": generated, "cached": False}
+  return fetchWithRetry(
+    '/api/ideate',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: item.url || item.item_url,
+        title: item.title,
+        category: item.category || 'tech',
+        summary: profileInputs.currentSummary || item.summary || '',
+        dept: item.dept || [],
+        stack_tags: item.stack_tags || [],
+        education_level: profileInputs.educationLevel,
+        builder_goal: profileInputs.builderGoal,
+        user_background: profileInputs.userBackground,
+        creativity_mode: profileInputs.creativityMode,
+        gemini_api_key: userKey || undefined,
+      }),
+    },
+    { retries: 1 }
+  )
+}
+export function sendBuilderChatMessage(messages, contextItem = null, userProfile = null) {
+  let userKey = ''
+  try {
+    userKey = localStorage.getItem('signal_gemini_api_key') || ''
+  } catch {}
 
-
-# ── Authenticated User Profile, Niche Section & Saved Items Endpoints ───────
-
-class PreferencesUpdateRequest(BaseModel):
-    preferred_depts: list[str] = Field(default_factory=list)
-    preferred_sources: list[str] = Field(default_factory=list)
-
-
-class NewsletterPrefsRequest(BaseModel):
-    daily_newsletter: bool = False
-    weekly_newsletter: bool = False
-
-
-class SavedItemRequest(BaseModel):
-    item_url: str
-    title: str
-    source: str = ""
-    category: str = ""
-    summary: str = ""
-    custom_note: str = ""
-    dept: list[str] = Field(default_factory=list)
-    stack_tags: list[str] = Field(default_factory=list)
-
-
-@app.get("/api/me")
-def get_me(user: dict = Depends(get_current_user)):
-    try:
-        profile = db.get_or_create_user_profile(user)
-        saved = db.list_saved_items(user["user_id"])
-        return {"profile": profile, "saved_items": saved}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not load user profile: {e}")
-
-
-@app.put("/api/me/preferences")
-def put_preferences(
-    req: PreferencesUpdateRequest,
-    user: dict = Depends(get_current_user),
-):
-    try:
-        updated = db.update_user_preferences(
-            user_id=user["user_id"],
-            preferred_depts=req.preferred_depts,
-            preferred_sources=req.preferred_sources,
-        )
-        return {"profile": updated}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not update preferences: {e}")
-
-
-@app.put("/api/me/newsletter")
-def put_newsletter_prefs(
-    req: NewsletterPrefsRequest,
-    user: dict = Depends(get_current_user),
-):
-    try:
-        updated = db.update_user_newsletter_prefs(
-            user_id=user["user_id"],
-            daily_newsletter=req.daily_newsletter,
-            weekly_newsletter=req.weekly_newsletter,
-        )
-        return {"profile": updated}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not update newsletter settings: {e}")
-
-
-@app.get("/api/me/saved")
-def get_saved(user: dict = Depends(get_current_user)):
-    try:
-        saved = db.list_saved_items(user["user_id"])
-        return {"saved_items": saved}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not load saved items: {e}")
-
-
-@app.post("/api/me/saved")
-def post_saved(req: SavedItemRequest, user: dict = Depends(get_current_user)):
-    try:
-        saved_row = db.save_or_update_user_item(user["user_id"], req.model_dump())
-        return {"saved_item": saved_row}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not save item: {e}")
-
-
-@app.delete("/api/me/saved")
-def remove_saved(
-    item_url: str = Query(..., description="URL of the saved item to remove"),
-    user: dict = Depends(get_current_user),
-):
-    try:
-        db.delete_saved_item(user["user_id"], item_url)
-        return {"deleted": True, "item_url": item_url}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not delete saved item: {e}")
-
-
-# ── Newsletter Preview, Test Send & Cron Dispatch Endpoints ─────────────────
-
-@app.get("/api/newsletter/preview")
-def preview_newsletter(
-    kind: str = Query("daily", pattern="^(daily|weekly)$"),
-    force_refresh: bool = False,
-    gemini_api_key: Optional[str] = Header(None, alias="X-Gemini-Key"),
-):
-    try:
-        if kind == "weekly":
-            issue = newsletter.build_or_get_weekly_issue(
-                force_refresh=force_refresh,
-                api_key=gemini_api_key,
-            )
-        else:
-            issue = newsletter.build_or_get_daily_issue(
-                force_refresh=force_refresh,
-                api_key=gemini_api_key,
-            )
-        return {"issue": issue}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not generate newsletter preview: {e}")
-
-
-class SendTestNewsletterRequest(BaseModel):
-    kind: str = "daily"
-    gemini_api_key: Optional[str] = None
-
-
-@app.post("/api/newsletter/send-test")
-def send_test_newsletter(
-    req: SendTestNewsletterRequest,
-    user: dict = Depends(get_current_user),
-):
-    try:
-        issue = (
-            newsletter.build_or_get_weekly_issue(api_key=req.gemini_api_key)
-            if req.kind == "weekly"
-            else newsletter.build_or_get_daily_issue(api_key=req.gemini_api_key)
-        )
-        delivery = newsletter.send_email_zero_cost(
-            to_email=user["email"],
-            subject=issue["subject"],
-            html_body=issue["html_body"],
-        )
-        return {"delivery": delivery, "issue_key": issue["issue_key"]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Test email failed: {e}")
-
-
-@app.post("/api/newsletter/dispatch")
-def dispatch_newsletter(
-    background_tasks: BackgroundTasks,
-    kind: str = Query("daily", pattern="^(daily|weekly)$"),
-):
-    background_tasks.add_task(newsletter.dispatch_newsletter_batch, kind)
-    return {"status": "dispatch_started", "kind": kind}
-
-
-
-
-class IdeateNetworkRequest(BaseModel):
-    url: str
-    title: str
-    category: str = "tech"
-    summary: str = ""
-    dept: list[str] = Field(default_factory=list)
-    stack_tags: list[str] = Field(default_factory=list)
-    education_level: str = "CS / Engineering Undergrad"
-    builder_goal: str = "Weekend Hackathon / Resume Project"
-    user_background: str = ""
-    creativity_mode: str = "mashup"
-    gemini_api_key: Optional[str] = None
-
-
-@app.post("/api/ideate")
-def post_ideate_network(req: IdeateNetworkRequest):
-    try:
-        all_items = db.load_items()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not load items for network: {e}")
-
-    connected_nodes = find_nearby_connected_items(
-        anchor_url=req.url,
-        anchor_title=req.title,
-        anchor_depts=req.dept,
-        anchor_stacks=req.stack_tags,
-        all_items=all_items,
-        max_nodes=4,
-    )
-
-    blueprint_html = generate_idea_network_blueprint(
-        anchor_item={
-            "url": req.url,
-            "title": req.title,
-            "category": req.category,
-            "summary": req.summary,
-            "dept": req.dept,
-            "stack_tags": req.stack_tags,
-        },
-        connected_nodes=connected_nodes,
-        education_level=req.education_level,
-        builder_goal=req.builder_goal,
-        user_background=req.user_background,
-        creativity_mode=req.creativity_mode,
-        api_key=req.gemini_api_key or os.environ.get("GEMINI_API_KEY"),
-    )
-
-    return {
-        "connected_nodes": connected_nodes,
-        "blueprint_html": blueprint_html,
-    }
-
-
-@app.get("/api/health")
-def health():
-    return {"ok": True}
+  return fetchWithRetry(
+    '/api/chat',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages,
+        context_item: contextItem,
+        user_profile: userProfile,
+        gemini_api_key: userKey || undefined,
+      }),
+    },
+    { retries: 1 }
+  )
+}
