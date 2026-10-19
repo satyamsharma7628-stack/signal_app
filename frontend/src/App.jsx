@@ -60,7 +60,6 @@ function loadStoredChatThreads() {
 
 export default function App() {
   const [theme, setTheme] = useState('dark')
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [status, setStatus] = useState(null)
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
@@ -565,438 +564,339 @@ export default function App() {
   }
 
   return (
-    <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-      {/* ── Collapsible Left Sidebar ── */}
-      <aside className={`app-sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
-        <div className="sidebar-brand-row">
-          <div className="app-title" onClick={() => switchTab('feed')} style={{ cursor: 'pointer' }}>
-            <span className="mark">▣</span>
-            {!sidebarCollapsed && (
+    <div className="app">
+      <div className="app-header">
+        <div className="app-title" onClick={() => switchTab('feed')} style={{ cursor: 'pointer' }}>
+          <span className="mark">▣</span>
+          <span className="name">Signal</span>
+          <span className="tag">50w tech digest</span>
+        </div>
+        <div className="header-actions">
+          <UserMenu
+            userProfile={userProfile}
+            deptMeta={DEPT_META}
+            onSignInGoogle={handleSignInGoogle}
+            onSignInEmail={handleSignInEmail}
+            onSignUpEmail={handleSignUpEmail}
+            onSignInDemo={handleSignInDemo}
+            onSignOut={handleSignOut}
+            onSaveNiches={handleSaveNiches}
+            isSupabaseConfigured={isSupabaseConfigured}
+          />
+          <NewsletterModal userProfile={userProfile} onProfileUpdate={setUserProfile} />
+          <ApiKeySettings />
+          <button className="icon-btn" onClick={handleManualRefresh} disabled={refreshing}>
+            {refreshing ? 'Refreshing…' : 'Refresh now'}
+          </button>
+          <button className="icon-btn" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
+            {theme === 'dark' ? 'Light' : 'Dark'}
+          </button>
+        </div>
+      </div>
+
+      <StatusBar status={status} isFetching={refreshing} />
+
+      {loading && (
+        <div className="empty-state">
+          {retryInfo || 'Loading…'}
+          <br />
+          <span style={{ fontSize: '0.75rem' }}>
+            First load can take 10–30s if the backend was asleep.
+          </span>
+        </div>
+      )}
+
+      {!loading && error && (
+        <div className="error-state">
+          {error}
+          <br />
+          <button className="btn" style={{ marginTop: '0.75rem' }} onClick={loadAll}>
+            Try again
+          </button>
+        </div>
+      )}
+
+      {!loading && !error && (
+        <>
+          <KpiStrip items={items} />
+
+          <div className="tabs" style={{ flexWrap: 'wrap' }}>
+            <button
+              className={`tab ${activeTab === 'feed' ? 'active' : ''}`}
+              onClick={() => switchTab('feed')}
+            >
+              News feed
+            </button>
+            <button
+              className={`tab ${activeTab === 'ideas' ? 'active' : ''}`}
+              onClick={() => switchTab('ideas')}
+            >
+              Builder ideas
+            </button>
+            {userProfile && (
               <>
-                <span className="name">Signal</span>
-                <span className="tag">50w</span>
+                <button
+                  className={`tab ${activeTab === 'my-feed' ? 'active' : ''}`}
+                  onClick={() => switchTab('my-feed')}
+                >
+                  ✨ My Feed
+                  {(userProfile.preferred_depts || []).length > 0 &&
+                    ` (${userProfile.preferred_depts.length})`}
+                </button>
+                <button
+                  className={`tab ${activeTab === 'saved' ? 'active' : ''}`}
+                  onClick={() => switchTab('saved')}
+                >
+                  🔖 Saved &amp; Notes ({savedItems.length})
+                </button>
               </>
             )}
-          </div>
-          <button
-            type="button"
-            className="collapse-btn"
-            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          >
-            {sidebarCollapsed ? '»' : '«'}
-          </button>
-        </div>
-
-        <div className="sidebar-section-label">{!sidebarCollapsed ? 'NAVIGATION' : '•••'}</div>
-        <nav className="sidebar-nav">
-          <button
-            type="button"
-            className={`sidebar-link ${activeTab === 'feed' ? 'active' : ''}`}
-            onClick={() => switchTab('feed')}
-            title="News feed"
-          >
-            <span className="nav-icon">📰</span>
-            {!sidebarCollapsed && <span>News feed</span>}
-          </button>
-
-          <button
-            type="button"
-            className={`sidebar-link ${activeTab === 'ideas' ? 'active' : ''}`}
-            onClick={() => switchTab('ideas')}
-            title="Builder ideas"
-          >
-            <span className="nav-icon">💡</span>
-            {!sidebarCollapsed && <span>Builder ideas</span>}
-          </button>
-
-          {userProfile && (
-            <>
-              <button
-                type="button"
-                className={`sidebar-link ${activeTab === 'my-feed' ? 'active' : ''}`}
-                onClick={() => switchTab('my-feed')}
-                title="My Niche Feed"
-              >
-                <span className="nav-icon">✨</span>
-                {!sidebarCollapsed && (
-                  <span>
-                    My Feed
-                    {(userProfile.preferred_depts || []).length > 0 &&
-                      ` (${userProfile.preferred_depts.length})`}
-                  </span>
-                )}
-              </button>
-
-              <button
-                type="button"
-                className={`sidebar-link ${activeTab === 'saved' ? 'active' : ''}`}
-                onClick={() => switchTab('saved')}
-                title="Saved & Notes"
-              >
-                <span className="nav-icon">🔖</span>
-                {!sidebarCollapsed && <span>Saved &amp; Notes ({savedItems.length})</span>}
-              </button>
-            </>
-          )}
-
-          <button
-            type="button"
-            className={`sidebar-link ${activeTab === 'chat' ? 'active' : ''}`}
-            onClick={() => switchTab('chat')}
-            title="AI Builder Chat"
-          >
-            <span className="nav-icon">💬</span>
-            {!sidebarCollapsed && <span>AI Builder Chat ({chatThreads.length})</span>}
-          </button>
-        </nav>
-
-        <div className="sidebar-section-label">{!sidebarCollapsed ? 'TOOLS & SETTINGS' : '⚙️'}</div>
-        <div className="sidebar-tools">
-          {!sidebarCollapsed ? (
-            <>
-              <NewsletterModal userProfile={userProfile} onProfileUpdate={setUserProfile} />
-              <ApiKeySettings />
-              <button
-                type="button"
-                className="icon-btn"
-                onClick={handleManualRefresh}
-                disabled={refreshing}
-              >
-                {refreshing ? '⏳ Refreshing…' : '🔄 Refresh feed'}
-              </button>
-              <button
-                type="button"
-                className="icon-btn"
-                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-              >
-                {theme === 'dark' ? '☀️ Light mode' : '🌙 Dark mode'}
-              </button>
-            </>
-          ) : (
-            <>
-              <button
-                type="button"
-                className="sidebar-link"
-                onClick={() => setSidebarCollapsed(false)}
-                title="Expand sidebar for Newsletter & API key settings"
-              >
-                <span className="nav-icon">📬</span>
-              </button>
-              <button
-                type="button"
-                className="sidebar-link"
-                onClick={handleManualRefresh}
-                disabled={refreshing}
-                title="Refresh feed"
-              >
-                <span className="nav-icon">🔄</span>
-              </button>
-              <button
-                type="button"
-                className="sidebar-link"
-                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                title="Toggle theme"
-              >
-                <span className="nav-icon">{theme === 'dark' ? '☀️' : '🌙'}</span>
-              </button>
-            </>
-          )}
-        </div>
-
-        <div className="sidebar-footer">
-          {!sidebarCollapsed ? (
-            <UserMenu
-              userProfile={userProfile}
-              deptMeta={DEPT_META}
-              onSignInGoogle={handleSignInGoogle}
-              onSignInEmail={handleSignInEmail}
-              onSignUpEmail={handleSignUpEmail}
-              onSignInDemo={handleSignInDemo}
-              onSignOut={handleSignOut}
-              onSaveNiches={handleSaveNiches}
-              isSupabaseConfigured={isSupabaseConfigured}
-            />
-          ) : (
             <button
-              type="button"
-              className="sidebar-link"
-              onClick={() => setSidebarCollapsed(false)}
-              title={userProfile ? userProfile.full_name || userProfile.email : 'Sign in'}
+              className={`tab ${activeTab === 'chat' ? 'active' : ''}`}
+              onClick={() => switchTab('chat')}
             >
-              <span className="nav-icon">👤</span>
-            </button>
-          )}
-        </div>
-      </aside>
-
-      {/* ── Main Content Area ── */}
-      <main className="app">
-        <StatusBar status={status} isFetching={refreshing} />
-
-        {loading && (
-          <div className="empty-state">
-            {retryInfo || 'Loading…'}
-            <br />
-            <span style={{ fontSize: '0.75rem' }}>
-              First load can take 10–30s if the backend was asleep.
-            </span>
-          </div>
-        )}
-
-        {!loading && error && (
-          <div className="error-state">
-            {error}
-            <br />
-            <button className="btn" style={{ marginTop: '0.75rem' }} onClick={loadAll}>
-              Try again
+              💬 AI Chat ({chatThreads.length})
             </button>
           </div>
-        )}
 
-        {!loading && !error && activeTab === 'chat' && (
-          <div className="chat-workspace">
-            {/* Thread history sidebar inside chat */}
-            <div className="chat-threads-list">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem' }}>
-                <span style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                  CHAT HISTORY ({chatThreads.length})
-                </span>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  style={{ padding: '0.25rem 0.6rem', fontSize: '0.74rem' }}
-                  onClick={handleStartBlankChat}
-                >
-                  + New
-                </button>
-              </div>
-              {chatThreads.map((t) => (
-                <div
-                  key={t.id}
-                  className={`chat-thread-item ${t.id === activeThread?.id ? 'active' : ''}`}
-                  onClick={() => setActiveThreadId(t.id)}
-                >
-                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem', fontWeight: 500 }}>
-                    {t.title}
-                  </div>
+          {activeTab === 'chat' ? (
+            <div className="chat-workspace">
+              <div className="chat-threads-list">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem' }}>
+                  <span style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                    CHAT HISTORY ({chatThreads.length})
+                  </span>
                   <button
                     type="button"
-                    className="thread-del-btn"
-                    onClick={(e) => handleDeleteThread(t.id, e)}
-                    title="Delete thread"
+                    className="btn btn-primary"
+                    style={{ padding: '0.25rem 0.6rem', fontSize: '0.74rem' }}
+                    onClick={handleStartBlankChat}
                   >
-                    ✕
+                    + New
                   </button>
                 </div>
-              ))}
-            </div>
+                {chatThreads.map((t) => (
+                  <div
+                    key={t.id}
+                    className={`chat-thread-item ${t.id === activeThread?.id ? 'active' : ''}`}
+                    onClick={() => setActiveThreadId(t.id)}
+                  >
+                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem', fontWeight: 500 }}>
+                      {t.title}
+                    </div>
+                    <button
+                      type="button"
+                      className="thread-del-btn"
+                      onClick={(e) => handleDeleteThread(t.id, e)}
+                      title="Delete thread"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
 
-            {/* Active chat messages & input */}
-            <div className="chat-main-pane">
-              <div className="chat-pane-header">
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{activeThread?.title}</div>
-                  {activeThread?.contextItem?.title && (
-                    <div style={{ fontSize: '0.74rem', color: 'var(--accent)' }}>
-                      Linked drop: {activeThread.contextItem.title}
+              <div className="chat-main-pane">
+                <div className="chat-pane-header">
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{activeThread?.title}</div>
+                    {activeThread?.contextItem?.title && (
+                      <div style={{ fontSize: '0.74rem', color: 'var(--accent)' }}>
+                        Linked drop: {activeThread.contextItem.title}
+                      </div>
+                    )}
+                  </div>
+                  <button type="button" className="btn" style={{ fontSize: '0.75rem', padding: '0.3rem 0.65rem' }} onClick={() => switchTab('feed')}>
+                    ← Back to Feed
+                  </button>
+                </div>
+
+                <div className="chat-messages-scroll">
+                  {(activeThread?.messages || []).map((m, idx) => (
+                    <div key={idx} className={`chat-bubble ${m.role === 'user' ? 'user' : 'assistant'}`}>
+                      <div className="chat-bubble-role">
+                        {m.role === 'user' ? 'You' : '▣ Signal AI'}
+                      </div>
+                      {m.role === 'user' ? (
+                        <div>{m.content}</div>
+                      ) : (
+                        <div dangerouslySetInnerHTML={{ __html: m.content }} />
+                      )}
+                    </div>
+                  ))}
+                  {sendingChat && (
+                    <div className="chat-bubble assistant">
+                      <div className="chat-bubble-role">▣ Signal AI</div>
+                      <div style={{ color: 'var(--text-muted)' }}>Thinking…</div>
                     </div>
                   )}
                 </div>
-                <button type="button" className="btn" style={{ fontSize: '0.75rem', padding: '0.3rem 0.65rem' }} onClick={() => switchTab('feed')}>
-                  ← Back to Feed
-                </button>
-              </div>
 
-              <div className="chat-messages-scroll">
-                {(activeThread?.messages || []).map((m, idx) => (
-                  <div key={idx} className={`chat-bubble ${m.role === 'user' ? 'user' : 'assistant'}`}>
-                    <div className="chat-bubble-role">
-                      {m.role === 'user' ? 'You' : '▣ Signal AI'}
-                    </div>
-                    {m.role === 'user' ? (
-                      <div>{m.content}</div>
-                    ) : (
-                      <div dangerouslySetInnerHTML={{ __html: m.content }} />
-                    )}
-                  </div>
-                ))}
-                {sendingChat && (
-                  <div className="chat-bubble assistant">
-                    <div className="chat-bubble-role">▣ Signal AI</div>
-                    <div style={{ color: 'var(--text-muted)' }}>Thinking…</div>
-                  </div>
-                )}
-              </div>
+                <div className="chat-quick-chips">
+                  {[
+                    'Give me the step-by-step MVP plan for a weekend',
+                    'What folder structure & database schema should I use?',
+                    'How can a beginner simplify this project?',
+                  ].map((q) => (
+                    <button
+                      key={q}
+                      type="button"
+                      className="dept-pill"
+                      onClick={(e) => handleSendChat(e, q)}
+                      disabled={sendingChat}
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
 
-              <div className="chat-quick-chips">
-                {[
-                  'Give me the step-by-step MVP plan for a weekend',
-                  'What folder structure & database schema should I use?',
-                  'How can a beginner simplify this project?',
-                ].map((q) => (
-                  <button
-                    key={q}
-                    type="button"
-                    className="dept-pill"
-                    onClick={(e) => handleSendChat(e, q)}
+                <form className="chat-input-row" onSubmit={handleSendChat}>
+                  <input
+                    type="text"
+                    className="modal-input"
+                    placeholder="Ask follow-up questions about stack, code, prerequisites, or how to build this…"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
                     disabled={sendingChat}
-                  >
-                    {q}
+                  />
+                  <button type="submit" className="btn btn-primary" disabled={sendingChat || !chatInput.trim()}>
+                    {sendingChat ? 'Sending…' : 'Send'}
                   </button>
-                ))}
+                </form>
+              </div>
+            </div>
+          ) : (
+            <>
+              {activeTab === 'ideas' && (
+                <p className="tab-caption">
+                  Show HN launches, Product Hunt, r/SideProject &amp; r/startups builds, new GitHub
+                  repos, IndieHackers posts, and new model releases — anything where someone shipped
+                  something and said what they used.
+                </p>
+              )}
+
+              {activeTab === 'my-feed' && userProfile && (
+                <p className="tab-caption">
+                  {(userProfile.preferred_depts || []).length > 0 ? (
+                    <>
+                      Showing drops matching your saved niches:{' '}
+                      <b>
+                        {userProfile.preferred_depts
+                          .map((d) => DEPT_META[d]?.label || d)
+                          .join(', ')}
+                      </b>
+                      . Use <b>🎯 My Niches</b> in the top bar anytime to change them.
+                    </>
+                  ) : (
+                    <>
+                      You haven&apos;t picked any niche sections yet — click <b>🎯 My Niches</b> in the
+                      top bar to choose your favorite tech departments.
+                    </>
+                  )}
+                </p>
+              )}
+
+              {activeTab === 'saved' && userProfile && (
+                <p className="tab-caption">
+                  Your personal vault of saved articles, builder ideas, and custom notes/summaries.
+                </p>
+              )}
+
+              <div className="dept-bar">
+                <button
+                  className={`dept-pill ${dept === '' ? 'active' : ''}`}
+                  onClick={() => switchDept('')}
+                >
+                  All
+                </button>
+                {Object.entries(DEPT_META).map(([slug, { label, color }]) => {
+                  const count = deptCounts[slug] || 0
+                  if (count === 0) return null
+                  return (
+                    <button
+                      key={slug}
+                      className={`dept-pill ${dept === slug ? 'active' : ''}`}
+                      style={dept === slug ? { borderColor: color, color } : {}}
+                      onClick={() => switchDept(dept === slug ? '' : slug)}
+                    >
+                      {label}
+                      <span className="dept-count">{count}</span>
+                    </button>
+                  )
+                })}
               </div>
 
-              <form className="chat-input-row" onSubmit={handleSendChat}>
+              <div className="filter-bar">
                 <input
                   type="text"
-                  className="modal-input"
-                  placeholder="Ask follow-up questions about stack, code, prerequisites, or how to build this…"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  disabled={sendingChat}
+                  placeholder="Search titles, summaries, notes, stack…"
+                  value={search}
+                  onChange={(e) => {
+                    setSearch(e.target.value)
+                    setVisibleCount(PAGE_SIZE)
+                  }}
                 />
-                <button type="submit" className="btn btn-primary" disabled={sendingChat || !chatInput.trim()}>
-                  {sendingChat ? 'Sending…' : 'Send'}
-                </button>
-              </form>
-            </div>
-          </div>
-        )}
+                <select value={source} onChange={(e) => setSource(e.target.value)}>
+                  <option value="">All sources</option>
+                  {sourceOptions.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+                <select value={categoryOrStack} onChange={(e) => setCategoryOrStack(e.target.value)}>
+                  <option value="">{isIdeasTab ? 'All stacks' : 'All categories'}</option>
+                  {(isIdeasTab ? stackOptions : categoryOptions).map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+                <select value={sort} onChange={(e) => setSort(e.target.value)}>
+                  <option value="newest">Newest first</option>
+                  <option value="engagement">Most engagement</option>
+                  <option value="oldest">Oldest first</option>
+                </select>
+              </div>
 
-        {!loading && !error && activeTab !== 'chat' && (
-          <>
-            <KpiStrip items={items} />
-
-            {activeTab === 'ideas' && (
-              <p className="tab-caption">
-                Show HN launches, Product Hunt, r/SideProject &amp; r/startups builds, new GitHub
-                repos, IndieHackers posts, and new model releases — anything where someone shipped
-                something and said what they used.
-              </p>
-            )}
-
-            {activeTab === 'my-feed' && userProfile && (
-              <p className="tab-caption">
-                {(userProfile.preferred_depts || []).length > 0 ? (
-                  <>
-                    Showing drops matching your saved niches:{' '}
-                    <b>
-                      {userProfile.preferred_depts
-                        .map((d) => DEPT_META[d]?.label || d)
-                        .join(', ')}
-                    </b>
-                    . Use <b>🎯 My Niches</b> in the left sidebar anytime to change them.
-                  </>
-                ) : (
-                  <>
-                    You haven&apos;t picked any niche sections yet — click <b>🎯 My Niches</b> in the
-                    left sidebar to choose your favorite tech departments.
-                  </>
+              <div className="results-caption">
+                Showing {visible.length} of {filtered.length} items
+                {dept && DEPT_META[dept] && (
+                  <span className="dept-active-label"> in {DEPT_META[dept].label}</span>
                 )}
-              </p>
-            )}
+              </div>
 
-            {activeTab === 'saved' && userProfile && (
-              <p className="tab-caption">
-                Your personal vault of saved articles, builder ideas, and custom notes/summaries.
-              </p>
-            )}
-
-            <div className="dept-bar">
-              <button
-                className={`dept-pill ${dept === '' ? 'active' : ''}`}
-                onClick={() => switchDept('')}
-              >
-                All
-              </button>
-              {Object.entries(DEPT_META).map(([slug, { label, color }]) => {
-                const count = deptCounts[slug] || 0
-                if (count === 0) return null
-                return (
-                  <button
-                    key={slug}
-                    className={`dept-pill ${dept === slug ? 'active' : ''}`}
-                    style={dept === slug ? { borderColor: color, color } : {}}
-                    onClick={() => switchDept(dept === slug ? '' : slug)}
-                  >
-                    {label}
-                    <span className="dept-count">{count}</span>
-                  </button>
-                )
-              })}
-            </div>
-
-            <div className="filter-bar">
-              <input
-                type="text"
-                placeholder="Search titles, summaries, notes, stack…"
-                value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value)
-                  setVisibleCount(PAGE_SIZE)
-                }}
-              />
-              <select value={source} onChange={(e) => setSource(e.target.value)}>
-                <option value="">All sources</option>
-                {sourceOptions.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
-              <select value={categoryOrStack} onChange={(e) => setCategoryOrStack(e.target.value)}>
-                <option value="">{isIdeasTab ? 'All stacks' : 'All categories'}</option>
-                {(isIdeasTab ? stackOptions : categoryOptions).map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-              <select value={sort} onChange={(e) => setSort(e.target.value)}>
-                <option value="newest">Newest first</option>
-                <option value="engagement">Most engagement</option>
-                <option value="oldest">Oldest first</option>
-              </select>
-            </div>
-
-            <div className="results-caption">
-              Showing {visible.length} of {filtered.length} items
-              {dept && DEPT_META[dept] && (
-                <span className="dept-active-label"> in {DEPT_META[dept].label}</span>
+              {visible.length === 0 ? (
+                <div className="empty-state">
+                  {activeTab === 'saved'
+                    ? 'You have not saved any items yet. Click "☆ Save to my section" on any card to bookmark it.'
+                    : 'No items match these filters. Try clearing search or switching sources.'}
+                </div>
+              ) : (
+                visible.map((item) => (
+                  <FeedRow
+                    item={item}
+                    key={item.url || item.item_url}
+                    isAuthenticated={Boolean(userProfile)}
+                    savedEntry={savedByUrl[item.url || item.item_url]}
+                    onSaveOrUpdate={handleSaveOrUpdateItem}
+                    onRemoveSaved={handleRemoveSavedItem}
+                    onOpenInChat={handleOpenInChat}
+                  />
+                ))
               )}
-            </div>
 
-            {visible.length === 0 ? (
-              <div className="empty-state">
-                {activeTab === 'saved'
-                  ? 'You have not saved any items yet. Click "☆ Save to my section" on any card to bookmark it.'
-                  : 'No items match these filters. Try clearing search or switching sources.'}
-              </div>
-            ) : (
-              visible.map((item) => (
-                <FeedRow
-                  item={item}
-                  key={item.url || item.item_url}
-                  isAuthenticated={Boolean(userProfile)}
-                  savedEntry={savedByUrl[item.url || item.item_url]}
-                  onSaveOrUpdate={handleSaveOrUpdateItem}
-                  onRemoveSaved={handleRemoveSavedItem}
-                  onOpenInChat={handleOpenInChat}
-                />
-              ))
-            )}
-
-            {filtered.length > visibleCount && (
-              <div className="load-more-row">
-                <button className="btn" onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}>
-                  Load more
-                </button>
-              </div>
-            )}
-          </>
-        )}
-      </main>
+              {filtered.length > visibleCount && (
+                <div className="load-more-row">
+                  <button className="btn" onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}>
+                    Load more
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </>
+      )}
     </div>
   )
 }
