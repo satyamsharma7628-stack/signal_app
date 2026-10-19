@@ -182,3 +182,32 @@ export function sendTestNewsletter(kind = 'daily') {
     { retries: 1 }
   )
 }
+
+export function generateIdeaNetwork(item, profileInputs) {
+  let userKey = ''
+  try {
+    userKey = localStorage.getItem('signal_gemini_api_key') || ''
+  } catch {}
+
+  return fetchWithRetry(
+    '/api/ideate',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: item.url || item.item_url,
+        title: item.title,
+        category: item.category || 'tech',
+        summary: profileInputs.currentSummary || item.summary || '',
+        dept: item.dept || [],
+        stack_tags: item.stack_tags || [],
+        education_level: profileInputs.educationLevel,
+        builder_goal: profileInputs.builderGoal,
+        user_background: profileInputs.userBackground,
+        creativity_mode: profileInputs.creativityMode,
+        gemini_api_key: userKey || undefined,
+      }),
+    },
+    { retries: 1 }
+  )
+}
