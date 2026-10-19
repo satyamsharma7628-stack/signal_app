@@ -54,6 +54,7 @@ export default function FeedRow({
   savedEntry,
   onSaveOrUpdate,
   onRemoveSaved,
+  onOpenInChat,
 }) {
   const [expanded, setExpanded] = useState(false)
   const [summary, setSummary] = useState(null)
@@ -335,19 +336,49 @@ export default function FeedRow({
                 <span>
                   🕸️ <b>Find this idea interesting?</b> Want to see where you can use this &amp; how it connects to nearby drops?
                 </span>
-                <button
-                  type="button"
-                  className="btn"
-                  style={{
-                    padding: '0.28rem 0.65rem',
-                    fontSize: '0.74rem',
-                    borderColor: 'var(--accent)',
-                    color: 'var(--accent)',
-                  }}
-                  onClick={() => setIdeateOpen(!ideateOpen)}
-                >
-                  {ideateOpen ? '▾ Hide Idea Network' : '✨ Connect & Brainstorm →'}
-                </button>
+                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{
+                      padding: '0.28rem 0.65rem',
+                      fontSize: '0.74rem',
+                      borderColor: 'var(--accent)',
+                      color: 'var(--accent)',
+                    }}
+                    onClick={() => setIdeateOpen(!ideateOpen)}
+                  >
+                    {ideateOpen ? '▾ Hide Idea Network' : '✨ Connect & Brainstorm →'}
+                  </button>
+                  {onOpenInChat && (
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{
+                        padding: '0.28rem 0.65rem',
+                        fontSize: '0.74rem',
+                        borderColor: 'var(--idea)',
+                        color: 'var(--idea)',
+                      }}
+                      onClick={() =>
+                        onOpenInChat({
+                          item,
+                          summary: summary || item.summary || '',
+                          blueprint: ideateResult?.blueprint_html || '',
+                          connectedNodes: ideateResult?.connected_nodes || [],
+                          profileInputs: {
+                            educationLevel,
+                            builderGoal,
+                            userBackground,
+                            creativityMode,
+                          },
+                        })
+                      }
+                    >
+                      💬 Continue in AI Chat →
+                    </button>
+                  )}
+                </div>
               </div>
 
               {ideateOpen && (
