@@ -211,3 +211,24 @@ export function generateIdeaNetwork(item, profileInputs) {
     { retries: 1 }
   )
 }
+export function sendBuilderChatMessage(messages, contextItem = null, userProfile = null) {
+  let userKey = ''
+  try {
+    userKey = localStorage.getItem('signal_gemini_api_key') || ''
+  } catch {}
+
+  return fetchWithRetry(
+    '/api/chat',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages,
+        context_item: contextItem,
+        user_profile: userProfile,
+        gemini_api_key: userKey || undefined,
+      }),
+    },
+    { retries: 1 }
+  )
+}
