@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getSummary } from '../api'
+import { getSummary, generateIdeaNetwork } from '../api'
 
 const DEPT_META = {
   'cybersecurity':   { label: '🔒 Cybersecurity', color: '#e07070' },
@@ -9,6 +9,43 @@ const DEPT_META = {
   'web-dev':         { label: '🌐 Web Dev',         color: '#ff8c1a' },
   'innovator':       { label: '🚀 Innovator',       color: '#f9c04a' },
   'random-dev-idea': { label: '🎲 Random',          color: '#8b8a85' },
+}
+
+const CREATIVITY_PROFILE_KEY = 'signal_user_creativity_profile'
+
+const EDUCATION_OPTIONS = [
+  'High School / First-Year Beginner',
+  'CS / Engineering Undergrad (2nd–4th Year)',
+  'Self-Taught / Indie Hacker',
+  'Postgrad / Masters / Researcher',
+  'Working Software Engineer / Pro',
+]
+
+const GOAL_OPTIONS = [
+  'Weekend Hackathon / Resume Project',
+  'College Capstone / Research Project',
+  'Micro-SaaS / Side-Income Product',
+  'Open-Source Tool / Developer Library',
+]
+
+const CREATIVITY_MODES = [
+  { id: 'mashup',     label: '🔗 Cross-Pollinate (Mash up with nearby drops)' },
+  { id: 'practical',  label: '🛠️ Practical Use (Where can I use this today?)' },
+  { id: 'contrarian', label: '🚀 Twist / Niche Spin-Off (Find the gap)' },
+  { id: 'learn',      label: '🎓 Learn-by-Building Roadmap (For my level)' },
+]
+
+function loadSavedCreativityProfile() {
+  try {
+    const raw = localStorage.getItem(CREATIVITY_PROFILE_KEY)
+    if (raw) return JSON.parse(raw)
+  } catch {}
+  return {
+    educationLevel: EDUCATION_OPTIONS[1],
+    builderGoal: GOAL_OPTIONS[0],
+    userBackground: '',
+    creativityMode: 'mashup',
+  }
 }
 
 export default function FeedRow({
@@ -22,6 +59,16 @@ export default function FeedRow({
   const [summary, setSummary] = useState(null)
   const [loadingSummary, setLoadingSummary] = useState(false)
   const [summaryError, setSummaryError] = useState(null)
+
+  // Idea Network & Creativity section state (lives inside the summary box)
+  const [ideateOpen, setIdeateOpen] = useState(false)
+  const [educationLevel, setEducationLevel] = useState(() => loadSavedCreativityProfile().educationLevel)
+  const [builderGoal, setBuilderGoal] = useState(() => loadSavedCreativityProfile().builderGoal)
+  const [userBackground, setUserBackground] = useState(() => loadSavedCreativityProfile().userBackground)
+  const [creativityMode, setCreativityMode] = useState(() => loadSavedCreativityProfile().creativityMode)
+  const [loadingIdeate, setLoadingIdeate] = useState(false)
+  const [ideateResult, setIdeateResult] = useState(null)
+  const [ideateError, setIdeateError] = useState('')
 
   const [editingNote, setEditingNote] = useState(false)
   const [noteDraft, setNoteDraft] = useState(savedEntry?.custom_note || '')
@@ -62,6 +109,33 @@ export default function FeedRow({
       } finally {
         setLoadingSummary(false)
       }
+    }
+  }
+
+  async function handleGenerateIdeaNetwork(e) {
+    e.preventDefault()
+    const profileToSave = {
+      educationLevel,
+      builderGoal,
+      userBackground,
+      creativityMode,
+    }
+    try {
+      localStorage.setItem(CREATIVITY_PROFILE_KEY, JSON.stringify(profileToSave))
+    } catch {}
+
+    setLoadingIdeate(true)
+    setIdeateError('')
+    try {
+      const res = await generateIdeaNetwork(item, {
+        ...profileToSave,
+        currentSummary: summary || item.summary || '',
+      })
+      setIdeateResult(res)
+    } catch (err) {
+      setIdeateError(err.message || 'Could not generate Idea Network connections.')
+    } finally {
+      setLoadingIdeate(false)
     }
   }
 
@@ -239,7 +313,188 @@ export default function FeedRow({
         <div className="summary-box">
           {loadingSummary && 'Generating 50-word summary…'}
           {summaryError && <span style={{ color: '#e08080' }}>{summaryError}</span>}
-          {summary && <div dangerouslySetInnerHTML={{ __html: summary }} />}
+          {summary && (
+            <>
+              <div dangerouslySetInnerHTML={{ __html: summary }} />
+
+              {/* Subtle Idea Network teaser line below the 50w summary */}
+              <div
+                style={{
+                  marginTop: '0.75rem',
+                  paddingTop: '0.6rem',
+                  borderTop: '1px dashed var(--border)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  flexWrap: 'wrap',
+                  gap: '0.5rem',
+                  fontSize: '0.78rem',
+                  color: 'var(--text-muted)',
+                }}
+              >
+                <span>
+                  🕸️ <b>Find this idea interesting?</b> Want to see where you can use this &amp; how it connects to nearby drops?
+                </span>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{
+                    padding: '0.28rem 0.65rem',
+                    fontSize: '0.74rem',
+                    borderColor: 'var(--accent)',
+                    color: 'var(--accent)',
+                  }}
+                  onClick={() => setIdeateOpen(!ideateOpen)}
+                >
+                  {ideateOpen ? '▾ Hide Idea Network' : '✨ Connect & Brainstorm →'}
+                </button>
+              </div>
+
+              {ideateOpen && (
+                <div
+                  style={{
+                    marginTop: '0.65rem',
+                    padding: '0.85rem',
+                    background: 'var(--panel)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '6px',
+                  }}
+                >
+                  <form onSubmit={handleGenerateIdeaNetwork}>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+                        gap: '0.55rem',
+                        marginBottom: '0.55rem',
+                      }}
+                    >
+                      <div>
+                        <label className="edit-label">Your Education / Level:</label>
+                        <select
+                          className="modal-input"
+                          value={educationLevel}
+                          onChange={(e) => setEducationLevel(e.target.value)}
+                        >
+                          {EDUCATION_OPTIONS.map((opt) => (
+                            <option key={opt} value={opt}>
+                              {opt}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="edit-label">What You Want to Build / Goal:</label>
+                        <select
+                          className="modal-input"
+                          value={builderGoal}
+                          onChange={(e) => setBuilderGoal(e.target.value)}
+                        >
+                          {GOAL_OPTIONS.map((opt) => (
+                            <option key={opt} value={opt}>
+                              {opt}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="edit-label">Creativity Mode:</label>
+                        <select
+                          className="modal-input"
+                          value={creativityMode}
+                          onChange={(e) => setCreativityMode(e.target.value)}
+                        >
+                          {CREATIVITY_MODES.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                      <div style={{ flex: 1, minWidth: '200px' }}>
+                        <label className="edit-label">
+                          About You (known languages, college major, or domains you like):
+                        </label>
+                        <input
+                          type="text"
+                          className="modal-input"
+                          placeholder="e.g., 2nd year B.Tech, know Python & basic React, interested in cybersecurity / gaming…"
+                          value={userBackground}
+                          onChange={(e) => setUserBackground(e.target.value)}
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        className="btn btn-primary"
+                        disabled={loadingIdeate}
+                        style={{ whiteSpace: 'nowrap' }}
+                      >
+                        {loadingIdeate ? 'Connecting drops…' : '⚡ Generate Connected Ideas'}
+                      </button>
+                    </div>
+                  </form>
+
+                  {ideateError && (
+                    <div style={{ color: '#e08080', fontSize: '0.78rem', marginTop: '0.5rem' }}>
+                      {ideateError}
+                    </div>
+                  )}
+
+                  {ideateResult && (
+                    <div style={{ marginTop: '0.85rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border)' }}>
+                      {ideateResult.connected_nodes?.length > 0 && (
+                        <div style={{ marginBottom: '0.75rem' }}>
+                          <div className="edit-label" style={{ marginBottom: '0.4rem' }}>
+                            🕸️ CONNECTED DROPS FROM NEARBY DAYS IN SIGNAL&apos;S DATABASE:
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.45rem' }}>
+                            {ideateResult.connected_nodes.map((node) => (
+                              <a
+                                key={node.url}
+                                href={node.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{
+                                  display: 'block',
+                                  padding: '0.45rem 0.6rem',
+                                  background: 'var(--bg-subtle)',
+                                  border: '1px solid var(--border)',
+                                  borderLeft: node.connection_type === 'Direct Synergy' ? '3px solid var(--accent)' : '3px solid var(--idea)',
+                                  borderRadius: '4px',
+                                  textDecoration: 'none',
+                                  fontSize: '0.76rem',
+                                }}
+                              >
+                                <div style={{ fontFamily: 'var(--mono)', fontSize: '0.64rem', color: 'var(--text-muted)' }}>
+                                  {node.connection_type} · {node.source}
+                                </div>
+                                <div style={{ fontWeight: 600, color: 'var(--text)', margin: '2px 0' }}>
+                                  {node.title}
+                                </div>
+                                <div style={{ fontSize: '0.68rem', color: 'var(--accent)' }}>
+                                  ↳ {node.connection_reason}
+                                </div>
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div
+                        style={{ fontSize: '0.84rem', lineHeight: 1.6 }}
+                        dangerouslySetInnerHTML={{ __html: ideateResult.blueprint_html }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
     </div>
