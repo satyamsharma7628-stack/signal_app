@@ -43,6 +43,47 @@ const DEPT_META = {
   'random-dev-idea': { label: '🎲 Random Dev Idea',   color: '#8b8a85' },
 }
 
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function sanitizeHtmlClient(dirtyHtml) {
+  if (!dirtyHtml || typeof window === 'undefined' || !window.DOMParser) return dirtyHtml || ''
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(String(dirtyHtml), 'text/html')
+    const allowedTags = new Set(['P', 'B', 'STRONG', 'I', 'EM', 'U', 'UL', 'OL', 'LI', 'BR', 'CODE', 'PRE', 'H3', 'H4', 'A', 'DIV', 'SPAN'])
+    for (const el of Array.from(doc.body.querySelectorAll('*'))) {
+      if (!allowedTags.has(el.tagName)) {
+        el.remove()
+        continue
+      }
+      for (const attr of Array.from(el.attributes)) {
+        const name = attr.name.toLowerCase()
+        const val = (attr.value || '').trim().toLowerCase()
+        if (name.startsWith('on') || name === 'srcdoc') {
+          el.removeAttribute(attr.name)
+        } else if (name === 'href') {
+          if (!val.startsWith('https://') && !val.startsWith('http://')) {
+            el.removeAttribute('href')
+          } else {
+            el.setAttribute('target', '_blank')
+            el.setAttribute('rel', 'noopener noreferrer')
+          }
+        }
+      }
+    }
+    return doc.body.innerHTML
+  } catch {
+    return ''
+  }
+}
+
 function loadLocalNiches() {
   try {
     const raw = localStorage.getItem(LOCAL_NICHES_KEY)
@@ -204,11 +245,12 @@ export default function App() {
     } catch {}
   }, [chatThreads])
 
-  // Effective tier: 'free' | 'pro' | 'admin' | 'suspended'
+  // Effective tier: strictly trusts server-verified `userProfile.subscription_tier`.
+  // Only a verified Admin can use `localTierOverride` to preview FREE or PRO views.
   const effectiveTier = useMemo(() => {
-    if (userProfile?.subscription_tier === 'suspended') return 'suspended'
-    const serverTier = (userProfile?.subscription_tier || '').toLowerCase()
-    if (localTierOverride && ['free', 'pro', 'admin'].includes(localTierOverride)) {
+    const serverTier = (userProfile?.subscription_tier || 'free').toLowerCase()
+    if (serverTier === 'suspended') return 'suspended'
+    if (serverTier === 'admin' && localTierOverride && ['free', 'pro', 'admin'].includes(localTierOverride)) {
       return localTierOverride
     }
     if (['free', 'pro', 'admin'].includes(serverTier)) {
@@ -241,41 +283,39 @@ export default function App() {
     setUpgradeModalOpen(true)
   }
 
-  async function handleSelectTierMode(targetTier, requireSecret = false) {
+  async function handleSelectTierMode(targetTier) {
     setTierActionMsg('')
     setTierActionErr('')
-    if (requireSecret && !adminSecretInput.trim() && effectiveTier !== 'admin') {
-      setTierActionErr('Enter the Admin Passcode (default: signal-admin-2026) to unlock Admin mode.')
+    if (!userProfile) {
+      setTierActionErr('Please sign in first (top right) so your account tier can be verified.')
+      return
+    }
+    const serverTier = (userProfile?.subscription_tier || 'free').toLowerCase()
+    if (serverTier !== 'admin' && !adminSecretInput.trim()) {
+      if (targetTier === 'pro') {
+        setTierActionMsg('To activate Signal PRO on your account, ask an Administrator to grant PRO to your email (' + userProfile.email + ') or enter the Admin Passcode below.')
+      } else {
+        setTierActionErr('Enter your server ADMIN_SECRET passcode to unlock Admin mode.')
+      }
       return
     }
     setSwitchingTier(true)
     try {
-      if (userProfile) {
-        const res = await claimAdminOrSwitchTier(adminSecretInput.trim() || 'signal-admin-2026', targetTier)
-        if (res?.profile) {
-          setUserProfile(res.profile)
-        }
+      const res = await claimAdminOrSwitchTier(adminSecretInput.trim(), targetTier)
+      if (res?.profile) {
+        setUserProfile(res.profile)
       }
       setLocalTierOverride(targetTier)
       try {
         localStorage.setItem(LOCAL_TIER_OVERRIDE_KEY, targetTier)
       } catch {}
-      setTierActionMsg(`Switched account view to ${targetTier.toUpperCase()}!`)
+      setAdminSecretInput('')
+      setTierActionMsg(`Verified & switched account tier to ${targetTier.toUpperCase()}!`)
       if (targetTier === 'admin') {
         loadAdminUsersList()
       }
     } catch (err) {
-      // If not signed in or secret mismatch when claiming admin with default key locally
-      if (!requireSecret || adminSecretInput.trim() === 'signal-admin-2026') {
-        setLocalTierOverride(targetTier)
-        try {
-          localStorage.setItem(LOCAL_TIER_OVERRIDE_KEY, targetTier)
-        } catch {}
-        setUserProfile((prev) => (prev ? { ...prev, subscription_tier: targetTier } : prev))
-        setTierActionMsg(`Activated ${targetTier.toUpperCase()} mode!`)
-      } else {
-        setTierActionErr(err.message || 'Could not change tier.')
-      }
+      setTierActionErr(err.message || 'Could not verify Admin Passcode.')
     } finally {
       setSwitchingTier(false)
     }
@@ -373,13 +413,13 @@ export default function App() {
     const connectedSummary =
       connectedNodes?.length > 0
         ? `<p><b>Connected Nearby Drops:</b> ${connectedNodes
-            .map((n) => `<a href="${n.url}" target="_blank" rel="noreferrer">${n.title}</a> (${n.source})`)
+            .map((n) => `<a href="${escapeHtml(n.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(n.title)}</a> (${escapeHtml(n.source)})`)
             .join(' · ')}</p>`
         : ''
     const initialAssistantHtml = `
-      <p><b>Loaded Story:</b> <a href="${item.url || item.item_url}" target="_blank" rel="noreferrer">${item.title}</a> (${item.source})</p>
-      ${summary ? `<div style="margin:0.4rem 0;color:var(--text-muted);">${summary}</div>` : ''}
-      ${blueprint ? `<div style="margin:0.5rem 0;padding:0.5rem 0.7rem;background:var(--bg);border-left:3px solid var(--accent);border-radius:4px;">${blueprint}</div>` : ''}
+      <p><b>Loaded Story:</b> <a href="${escapeHtml(item.url || item.item_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a> (${escapeHtml(item.source)})</p>
+      ${summary ? `<div>${sanitizeHtmlClient(summary)}</div>` : ''}
+      ${blueprint ? `<div>${sanitizeHtmlClient(blueprint)}</div>` : ''}
       ${connectedSummary}
       <p>What part of this would you like to explore or build? Ask for architecture steps, starter code, or how to adapt it to your level.</p>
     `.trim()
@@ -1292,7 +1332,7 @@ export default function App() {
                         {m.role === 'user' ? (
                           <div>{m.content}</div>
                         ) : (
-                          <div dangerouslySetInnerHTML={{ __html: m.content }} />
+                          <div dangerouslySetInnerHTML={{ __html: sanitizeHtmlClient(m.content) }} />
                         )}
                       </div>
                     ))}
@@ -1521,7 +1561,7 @@ export default function App() {
                 <button
                   type="button"
                   className="btn btn-block"
-                  onClick={() => handleSelectTierMode('free', false)}
+                  onClick={() => handleSelectTierMode('free')}
                   disabled={switchingTier || effectiveTier === 'free'}
                 >
                   {effectiveTier === 'free' ? 'Current Tier (FREE)' : 'Switch to FREE View'}
@@ -1545,7 +1585,7 @@ export default function App() {
                 <button
                   type="button"
                   className="btn btn-primary btn-block"
-                  onClick={() => handleSelectTierMode('pro', false)}
+                  onClick={() => handleSelectTierMode('pro')}
                   disabled={switchingTier || effectiveTier === 'pro'}
                 >
                   {effectiveTier === 'pro' ? '✓ PRO Active' : '⭐ Activate PRO Access'}
@@ -1565,14 +1605,14 @@ export default function App() {
                 🛡️ Site Owner / Admin Login
               </div>
               <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0 0 0.55rem' }}>
-                Enter your Admin Passcode (default: <code>signal-admin-2026</code> or <code>ADMIN_SECRET</code> in Render env vars) to unlock the <b>🛡️ Admin Console</b>, remove bad published posts, and grant/suspend user accounts.
+                Enter your private <code>ADMIN_SECRET</code> (set in Render Environment Variables, or add your email to <code>ADMIN_EMAILS</code>) to unlock the <b>🛡️ Admin Console</b>, remove bad published posts, and grant/suspend user accounts.
               </p>
               <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
                 <input
                   type="password"
                   className="modal-input"
                   style={{ flex: 1, minWidth: '190px' }}
-                  placeholder="Admin Passcode (default: signal-admin-2026)"
+                  placeholder="Enter your private ADMIN_SECRET…"
                   value={adminSecretInput}
                   onChange={(e) => setAdminSecretInput(e.target.value)}
                 />
@@ -1580,7 +1620,7 @@ export default function App() {
                   type="button"
                   className="btn"
                   style={{ borderColor: 'var(--idea)', color: 'var(--idea)', fontWeight: 600 }}
-                  onClick={() => handleSelectTierMode('admin', true)}
+                  onClick={() => handleSelectTierMode('admin')}
                   disabled={switchingTier}
                 >
                   {effectiveTier === 'admin' ? '✓ ADMIN Active' : '🛡️ Unlock ADMIN Mode'}
