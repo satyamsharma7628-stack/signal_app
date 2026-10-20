@@ -5,6 +5,48 @@ import {
   sendTestNewsletter,
 } from '../api'
 
+function sanitizeNewsletterHtml(dirtyHtml) {
+  if (!dirtyHtml || typeof window === 'undefined' || !window.DOMParser) return ''
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(String(dirtyHtml), 'text/html')
+    const allowedTags = new Set([
+      'DIV', 'SPAN', 'P', 'A', 'B', 'STRONG', 'I', 'EM', 'U', 'UL', 'OL', 'LI', 'BR', 'H3', 'H4', 'CODE'
+    ])
+    for (const el of Array.from(doc.body.querySelectorAll('*'))) {
+      if (!allowedTags.has(el.tagName)) {
+        el.remove()
+        continue
+      }
+      for (const attr of Array.from(el.attributes)) {
+        const name = attr.name.toLowerCase()
+        const val = (attr.value || '').trim()
+        const valLower = val.toLowerCase()
+        if (name.startsWith('on') || name === 'srcdoc') {
+          el.removeAttribute(attr.name)
+        } else if (name === 'href') {
+          if (!valLower.startsWith('https://') && !valLower.startsWith('http://')) {
+            el.removeAttribute('href')
+          } else {
+            el.setAttribute('target', '_blank')
+            el.setAttribute('rel', 'noopener noreferrer')
+          }
+        } else if (name === 'style') {
+          // Block any url() or expression() in inline styles
+          if (valLower.includes('url(') || valLower.includes('expression(') || valLower.includes('javascript:')) {
+            el.removeAttribute('style')
+          }
+        } else if (name !== 'target' && name !== 'rel' && name !== 'class') {
+          el.removeAttribute(attr.name)
+        }
+      }
+    }
+    return doc.body.innerHTML
+  } catch {
+    return ''
+  }
+}
+
 export default function NewsletterModal({ userProfile, onProfileUpdate }) {
   const [open, setOpen] = useState(false)
   const [activeKind, setActiveKind] = useState('daily')
@@ -17,6 +59,9 @@ export default function NewsletterModal({ userProfile, onProfileUpdate }) {
   const [savingPrefs, setSavingPrefs] = useState(false)
   const [sendingTest, setSendingTest] = useState(false)
   const [statusMsg, setStatusMsg] = useState('')
+
+  const hasProAccess =
+    userProfile?.subscription_tier === 'pro' || userProfile?.subscription_tier === 'admin'
 
   useEffect(() => {
     setDailySub(Boolean(userProfile?.daily_newsletter))
@@ -67,7 +112,7 @@ export default function NewsletterModal({ userProfile, onProfileUpdate }) {
       if (res.delivery?.sent) {
         setStatusMsg(`Sent ${activeKind} issue to ${res.delivery.to} via ${res.delivery.provider}!`)
       } else {
-        setStatusMsg(res.delivery?.message || 'Preview ready (configure SMTP/Brevo on Render to email).')
+        setStatusMsg(res.delivery?.message || 'Preview ready (configure Brevo/Webhook on Render to email).')
       }
     } catch (err) {
       setStatusMsg(err.message || 'Could not send test email.')
@@ -128,12 +173,15 @@ export default function NewsletterModal({ userProfile, onProfileUpdate }) {
                   </div>
                   <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                     Every Sunday: AI-synthesized tools to adopt, engineering lessons to steal, and a weekend builder idea from the week&apos;s top drops.
+                    {!hasProAccess && userProfile && (
+                      <span style={{ color: 'var(--accent)', marginLeft: 6 }}>(Requires Signal PRO)</span>
+                    )}
                   </div>
                 </div>
                 <input
                   type="checkbox"
                   checked={weeklySub}
-                  disabled={!userProfile || savingPrefs}
+                  disabled={!userProfile || !hasProAccess || savingPrefs}
                   onChange={(e) => handleTogglePrefs(dailySub, e.target.checked)}
                   style={{ width: 18, height: 18, accentColor: 'var(--accent)' }}
                 />
@@ -175,7 +223,7 @@ export default function NewsletterModal({ userProfile, onProfileUpdate }) {
                   onClick={() => loadPreview(activeKind, true)}
                   disabled={loadingPreview}
                 >
-                  ↻ Regenerate
+                  ↻ Refresh Preview
                 </button>
                 {userProfile && (
                   <button
@@ -200,7 +248,7 @@ export default function NewsletterModal({ userProfile, onProfileUpdate }) {
                 <div className="error-state">{previewError}</div>
               )}
               {!loadingPreview && !previewError && issue && (
-                <div dangerouslySetInnerHTML={{ __html: issue.html_body }} />
+                <div dangerouslySetInnerHTML={{ __html: sanitizeNewsletterHtml(issue.html_body) }} />
               )}
             </div>
           </div>
