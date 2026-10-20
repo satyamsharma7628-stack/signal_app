@@ -48,6 +48,41 @@ function loadSavedCreativityProfile() {
   }
 }
 
+function sanitizeHtmlClient(dirtyHtml) {
+  if (!dirtyHtml || typeof window === 'undefined' || !window.DOMParser) return dirtyHtml || ''
+  try {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(String(dirtyHtml), 'text/html')
+    const allowedTags = new Set(['P', 'B', 'STRONG', 'I', 'EM', 'U', 'UL', 'OL', 'LI', 'BR', 'CODE', 'PRE', 'H3', 'H4', 'A', 'DIV', 'SPAN'])
+    const nodes = Array.from(doc.body.querySelectorAll('*'))
+    for (const el of nodes) {
+      if (!allowedTags.has(el.tagName)) {
+        el.remove()
+        continue
+      }
+      for (const attr of Array.from(el.attributes)) {
+        const name = attr.name.toLowerCase()
+        const val = (attr.value || '').trim().toLowerCase()
+        if (name.startsWith('on') || name === 'style' || name === 'srcdoc') {
+          el.removeAttribute(attr.name)
+        } else if (name === 'href') {
+          if (!val.startsWith('https://') && !val.startsWith('http://')) {
+            el.removeAttribute('href')
+          } else {
+            el.setAttribute('target', '_blank')
+            el.setAttribute('rel', 'noopener noreferrer')
+          }
+        } else if (name !== 'class' && name !== 'target' && name !== 'rel') {
+          el.removeAttribute(attr.name)
+        }
+      }
+    }
+    return doc.body.innerHTML
+  } catch {
+    return ''
+  }
+}
+
 export default function FeedRow({
   item,
   isAuthenticated,
@@ -411,7 +446,7 @@ export default function FeedRow({
           {summaryError && <span style={{ color: '#e08080' }}>{summaryError}</span>}
           {summary && (
             <>
-              <div dangerouslySetInnerHTML={{ __html: summary }} />
+              <div dangerouslySetInnerHTML={{ __html: sanitizeHtmlClient(summary) }} />
 
               {/* Idea Network & AI Chat bar below the 50w summary */}
               <div
@@ -627,7 +662,7 @@ export default function FeedRow({
 
                       <div
                         style={{ fontSize: '0.84rem', lineHeight: 1.6 }}
-                        dangerouslySetInnerHTML={{ __html: ideateResult.blueprint_html }}
+                        dangerouslySetInnerHTML={{ __html: sanitizeHtmlClient(ideateResult.blueprint_html) }}
                       />
                     </div>
                   )}
