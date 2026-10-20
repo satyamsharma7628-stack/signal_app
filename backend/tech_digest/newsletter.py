@@ -23,6 +23,19 @@ from typing import Optional
 import requests
 
 from . import config, db
+from .summarizer import sanitize_ai_html
+
+
+def _safe_http_url(raw_url: str) -> str:
+    u = (raw_url or '').strip()
+    if not (u.startswith('https://') or u.startswith('http://')):
+        return '#'
+    return html.escape(u, quote=True)
+
+
+def _get_public_app_url() -> str:
+    raw = (os.environ.get('FRONTEND_ORIGIN') or 'https://signal-app-asd.pages.dev').strip().rstrip('/')
+    return _safe_http_url(raw)
 
 
 def _get_source_weight(source: str) -> float:
@@ -218,7 +231,7 @@ def build_or_get_daily_issue(force_refresh: bool = False, api_key: Optional[str]
               <div style="font-size:11px;color:#6b7280;font-family:monospace;text-transform:uppercase;margin-bottom:4px;">
                 #{idx + 1}{eng_badge} · {html.escape(item.get('category', 'tech'))}
               </div>
-              <a href="{item['url']}" target="_blank" rel="noreferrer" style="font-size:16px;font-weight:700;color:#111827;text-decoration:underline;display:block;margin-bottom:6px;line-height:1.35;">
+              <a href="{_safe_http_url(item.get('url', ''))}" target="_blank" rel="noopener noreferrer" style="font-size:16px;font-weight:700;color:#111827;text-decoration:underline;display:block;margin-bottom:6px;line-height:1.35;">
                 {title_escaped}
               </a>
               <p style="font-size:14px;color:#374151;line-height:1.55;margin:0;">
@@ -244,7 +257,7 @@ def build_or_get_daily_issue(force_refresh: bool = False, api_key: Optional[str]
       </div>
       {''.join(rows_html)}
       <div style="text-align:center;font-size:12px;color:#6b7280;margin-top:16px;padding-top:12px;border-top:1px solid #e5e7eb;">
-        Sent by <a href="https://signal-app-asd.pages.dev" style="color:#ea580c;font-weight:600;">Signal Tech Digest</a>
+        Sent by <a href="{_get_public_app_url()}" style="color:#ea580c;font-weight:600;">Signal Tech Digest</a>
       </div>
     </div>
     """.strip()
@@ -309,13 +322,13 @@ def build_or_get_weekly_issue(force_refresh: bool = False, api_key: Optional[str
                 playbook_html = playbook_html.replace("```", "", 1)
             if playbook_html.endswith("```"):
                 playbook_html = playbook_html.rsplit("```", 1)[0]
-            playbook_html = playbook_html.strip()
+            playbook_html = sanitize_ai_html(playbook_html.strip())
         except Exception as e:
             print(f"[newsletter] Weekly playbook AI fallback: {e}")
 
     if not playbook_html:
         top_links = "".join(
-            f"<li style='margin-bottom:8px;'><a href='{it['url']}' style='color:#ea580c;font-weight:600;'>{html.escape(_clean_html_entities(it['title']))}</a> ({html.escape(it['source'])}) — {html.escape(_clean_html_entities(it.get('summary') or 'High-signal release.')[:140])}</li>"
+            f"<li style='margin-bottom:8px;'><a href='{_safe_http_url(it.get('url', ''))}' target='_blank' rel='noopener noreferrer' style='color:#ea580c;font-weight:600;'>{html.escape(_clean_html_entities(it['title']))}</a> ({html.escape(it['source'])}) — {html.escape(_clean_html_entities(it.get('summary') or 'High-signal release.')[:140])}</li>"
             for it in top_weekly[:5]
         )
         playbook_html = f"""
@@ -344,7 +357,7 @@ def build_or_get_weekly_issue(force_refresh: bool = False, api_key: Optional[str
         {playbook_html}
       </div>
       <div style="text-align:center;font-size:12px;color:#6b7280;margin-top:16px;padding-top:12px;border-top:1px solid #e5e7eb;">
-        Sent by <a href="https://signal-app-asd.pages.dev" style="color:#ea580c;font-weight:600;">Signal Tech Digest</a>
+        Sent by <a href="{_get_public_app_url()}" style="color:#ea580c;font-weight:600;">Signal Tech Digest</a>
       </div>
     </div>
     """.strip()
