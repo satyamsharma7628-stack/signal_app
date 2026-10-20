@@ -73,17 +73,38 @@ async def security_headers_middleware(request: Request, call_next):
 # ── Sliding-Window In-Memory Rate Limiter ───────────────────────────────────
 
 _rate_buckets: dict[str, deque] = defaultdict(deque)
+MAX_RATE_BUCKETS = 4096
 
 
 def get_client_ip(request: Request) -> str:
+    """Extracts the non-spoofable client IP set by Render/Cloudflare proxy:
+    prefers CF-Connecting-IP or X-Real-IP, or falls back to the LAST hop
+    appended to X-Forwarded-For by the reverse proxy."""
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()[:64]
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()[:64]
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()[:64]
+        hops = [h.strip() for h in forwarded.split(",") if h.strip()]
+        if hops:
+            return hops[-1][:64]
     return (request.client.host if request.client else "unknown")[:64]
 
 
 def enforce_rate_limit(bucket_name: str, client_id: str, max_calls: int, window_seconds: int):
     now = time.time()
+    # Periodically evict stale keys so _rate_buckets never grows without bound
+    if len(_rate_buckets) > MAX_RATE_BUCKETS:
+        stale_keys = [
+            k for k, dq in list(_rate_buckets.items())
+            if not dq or (now - dq[-1]) > window_seconds
+        ]
+        for k in stale_keys:
+            _rate_buckets.pop(k, None)
+
     key = f"{bucket_name}:{client_id}"
     q = _rate_buckets[key]
     while q and (now - q[0]) > window_seconds:
@@ -237,28 +258,50 @@ class SummaryRequest(BaseModel):
 
 @app.post("/api/summary")
 def get_summary(req: SummaryRequest, request: Request):
+    """Generates or returns a cached 50-word AI summary.
+    Security hardening against cache poisoning & Gemini key abuse:
+    - Looks up `req.url` in our `items` table (`db.get_item_by_url`).
+    - When using the server's GEMINI_API_KEY (not BYOK), requires `req.url` to exist
+      in `items` and strictly uses the server-stored title, category, and snippet
+      instead of trusting client-supplied `existing_summary`.
+    """
     client_ip = get_client_ip(request)
-    enforce_rate_limit("summary", client_ip, max_calls=20, window_seconds=60)
+    enforce_rate_limit("summary", client_ip, max_calls=15, window_seconds=60)
 
-    using_own_key = bool(req.gemini_api_key)
+    using_own_key = bool(req.gemini_api_key and req.gemini_api_key.strip())
+    known_item = db.get_item_by_url(req.url)
 
     if not using_own_key:
+        if not known_item:
+            raise HTTPException(
+                status_code=404,
+                detail="Item not found in Signal feed. Provide your own Gemini API key to summarize external URLs.",
+            )
         cached = get_cached_summary(req.url)
-        if cached:
+        if cached and cached != db.ADMIN_REMOVED_MARKER:
             return {"summary": cached, "cached": True}
+
+    trusted_title = known_item.get("title", req.title) if known_item else req.title
+    trusted_category = known_item.get("category", req.category) if known_item else req.category
+    # Never let unverified client `existing_summary` poison the shared summary cache
+    trusted_existing_summary = (
+        (known_item.get("summary") or "")
+        if known_item
+        else (req.existing_summary if using_own_key else "")
+    )
 
     try:
         generated = summarize_article(
             url=req.url,
-            title=req.title,
-            category=req.category,
-            existing_summary=req.existing_summary,
-            api_key=req.gemini_api_key or os.environ.get("GEMINI_API_KEY"),
+            title=trusted_title,
+            category=trusted_category,
+            existing_summary=trusted_existing_summary,
+            api_key=(req.gemini_api_key.strip() if using_own_key else None) or os.environ.get("GEMINI_API_KEY"),
         )
     except Exception:
         raise HTTPException(status_code=500, detail="Summary generation failed.")
 
-    if not using_own_key:
+    if not using_own_key and known_item:
         save_summary_to_cache(req.url, generated)
 
     return {"summary": generated, "cached": False}
@@ -288,18 +331,14 @@ class SavedItemRequest(BaseModel):
 
 
 @app.get("/api/me")
-def get_me(authorization: Optional[str] = Header(None)):
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Sign in required.")
-    token = authorization.split(" ", 1)[1].strip()
-    user_info = db.verify_user_token(token)
-    if not user_info:
+def get_me(user: Optional[dict] = Depends(get_optional_user)):
+    if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired login session.")
     try:
-        profile = db.get_or_create_user_profile(user_info)
+        profile = user.get("profile") or db.get_or_create_user_profile(user)
         if profile.get("subscription_tier") == "suspended":
             return {"profile": profile, "saved_items": [], "suspended": True}
-        saved = db.list_saved_items(user_info["user_id"])
+        saved = db.list_saved_items(user["user_id"])
         return {"profile": profile, "saved_items": saved, "suspended": False}
     except Exception:
         raise HTTPException(status_code=500, detail="Could not load user profile.")
@@ -407,12 +446,16 @@ def post_claim_admin(
         provided = req.admin_secret.strip()
         if not provided or not hmac.compare_digest(provided.encode("utf-8"), expected_secret.encode("utf-8")):
             raise HTTPException(status_code=403, detail="Invalid Admin Passcode.")
+        # Non-admins authenticating with ADMIN_SECRET are strictly promoted to 'admin'
+        target_tier = "admin"
+    else:
+        target_tier = req.target_tier or "admin"
 
     try:
         updated = db.admin_set_user_tier(
             target_user_id=user["user_id"],
             target_email=user.get("email"),
-            new_tier=req.target_tier or "admin",
+            new_tier=target_tier,
         )
         return {"profile": updated}
     except Exception as e:
