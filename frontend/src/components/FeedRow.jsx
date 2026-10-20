@@ -51,17 +51,22 @@ function loadSavedCreativityProfile() {
 export default function FeedRow({
   item,
   isAuthenticated,
+  userTier = 'free',
+  isProContent = false,
   savedEntry,
   onSaveOrUpdate,
   onRemoveSaved,
   onOpenInChat,
+  onOpenUpgradeModal,
+  onAdminDeleteItem,
+  onAdminToggleProItem,
 }) {
   const [expanded, setExpanded] = useState(false)
   const [summary, setSummary] = useState(null)
   const [loadingSummary, setLoadingSummary] = useState(false)
   const [summaryError, setSummaryError] = useState(null)
 
-  // Idea Network & Creativity section state (lives inside the summary box)
+  // Idea Network & Creativity section state
   const [ideateOpen, setIdeateOpen] = useState(false)
   const [educationLevel, setEducationLevel] = useState(() => loadSavedCreativityProfile().educationLevel)
   const [builderGoal, setBuilderGoal] = useState(() => loadSavedCreativityProfile().builderGoal)
@@ -79,6 +84,9 @@ export default function FeedRow({
 
   const itemUrl = item.url || item.item_url
   const isSaved = Boolean(savedEntry)
+  const hasProAccess = userTier === 'pro' || userTier === 'admin'
+  const isAdmin = userTier === 'admin'
+  const isLockedForFreeUser = isProContent && !hasProAccess
 
   useEffect(() => {
     if (savedEntry) {
@@ -97,6 +105,10 @@ export default function FeedRow({
     : 'n/a'
 
   async function handleExpand() {
+    if (isLockedForFreeUser) {
+      onOpenUpgradeModal?.('Unlock PRO-exclusive deep-dive drops, 50-word AI summaries, and Idea Network blueprints.')
+      return
+    }
     const next = !expanded
     setExpanded(next)
     if (next && summary === null && !loadingSummary) {
@@ -115,6 +127,10 @@ export default function FeedRow({
 
   async function handleGenerateIdeaNetwork(e) {
     e.preventDefault()
+    if (!hasProAccess) {
+      onOpenUpgradeModal?.('Connect & Brainstorm (Idea Network) is a Signal PRO feature.')
+      return
+    }
     const profileToSave = {
       educationLevel,
       builderGoal,
@@ -168,9 +184,10 @@ export default function FeedRow({
     setSavingItem(true)
     setActionFeedback('')
     try {
-      await onSaveOrUpdate(item, noteDraft, summaryDraft)
+      const nextSummary = hasProAccess ? summaryDraft : (savedEntry?.summary || item.summary || '')
+      await onSaveOrUpdate(item, noteDraft, nextSummary)
       setEditingNote(false)
-      setActionFeedback('Note & custom summary saved!')
+      setActionFeedback('Note saved!')
       setTimeout(() => setActionFeedback(''), 3000)
     } catch (err) {
       setActionFeedback(err.message || 'Could not save note.')
@@ -183,22 +200,58 @@ export default function FeedRow({
   const displayedSummary = savedEntry?.summary || item.summary || 'No summary available.'
 
   return (
-    <div className={`row ${item.is_builder_idea ? 'is-idea' : ''}`}>
+    <div className={`row ${item.is_builder_idea ? 'is-idea' : ''} ${isLockedForFreeUser ? 'pro-locked-row' : ''}`}>
       <div className="row-top">
         <div className="row-badges">
           {item.tier && <span className="chip chip-tier">T{item.tier}</span>}
           <span className="chip chip-source">{item.source}</span>
           <span className="chip chip-cat">{item.category}</span>
           {item.is_builder_idea && <span className="chip chip-idea">builder idea</span>}
+          {isProContent && (
+            <span className="chip chip-pro-lock">
+              {hasProAccess ? '⭐ PRO UNLOCKED' : '🔒 PRO CONTENT'}
+            </span>
+          )}
           {isSaved && <span className="chip chip-saved">★ saved</span>}
         </div>
         <div className="row-date">{pubDate}</div>
       </div>
 
-      <a className="row-title" href={itemUrl} target="_blank" rel="noreferrer">
-        {item.title}
-      </a>
-      <div className="row-summary">{displayedSummary}</div>
+      {isLockedForFreeUser ? (
+        <div
+          className="row-title"
+          style={{ cursor: 'pointer' }}
+          onClick={() =>
+            onOpenUpgradeModal?.('This high-signal builder drop is reserved for Signal PRO members.')
+          }
+        >
+          🔒 {item.title}
+        </div>
+      ) : (
+        <a className="row-title" href={itemUrl} target="_blank" rel="noreferrer">
+          {item.title}
+        </a>
+      )}
+
+      {isLockedForFreeUser ? (
+        <div className="pro-content-teaser">
+          <div className="pro-blurred-text">
+            {displayedSummary.slice(0, 110)}… [Full technical breakdown, source link, and 4-point Idea Network blueprint locked for Free accounts]
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            style={{ padding: '0.32rem 0.75rem', fontSize: '0.76rem', flexShrink: 0 }}
+            onClick={() =>
+              onOpenUpgradeModal?.('Upgrade to Signal PRO to unlock all PRO-exclusive drops, Idea Network blueprints, and AI Builder Chat.')
+            }
+          >
+            ⭐ Unlock with PRO
+          </button>
+        </div>
+      ) : (
+        <div className="row-summary">{displayedSummary}</div>
+      )}
 
       {savedEntry?.custom_note && !editingNote && (
         <div className="personal-note-box">
@@ -238,12 +291,14 @@ export default function FeedRow({
         {item.engagement_raw > 0 && (
           <span className="engagement">▲ {Math.round(item.engagement_raw)}</span>
         )}
-        <span className="row-url">{itemUrl}</span>
+        <span className="row-url">{isLockedForFreeUser ? '🔒 Hidden on Free tier' : itemUrl}</span>
       </div>
 
       <div className="row-actions-bar">
         <button type="button" className="summary-toggle" onClick={handleExpand}>
-          {expanded ? '▾' : '▸'} {expanded ? 'Hide 50w AI summary' : 'View 50w AI summary'}
+          {isLockedForFreeUser
+            ? '🔒 Unlock 50w AI summary (PRO)'
+            : `${expanded ? '▾' : '▸'} ${expanded ? 'Hide 50w AI summary' : 'View 50w AI summary'}`}
         </button>
 
         {isAuthenticated && (
@@ -272,8 +327,38 @@ export default function FeedRow({
                 setEditingNote(!editingNote)
               }}
             >
-              ✎ {savedEntry?.custom_note ? 'Edit note / summary' : 'Add note / edit'}
+              ✎ {savedEntry?.custom_note ? 'Edit note' : 'Add note / edit'}
             </button>
+
+            {isAdmin && (
+              <>
+                <button
+                  type="button"
+                  className="summary-toggle"
+                  style={{ color: 'var(--accent)' }}
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    onAdminToggleProItem?.(itemUrl)
+                  }}
+                  title="Admin: Lock or unlock this item as PRO-only content"
+                >
+                  {isProContent ? '🔓 Make Free' : '🔒 Mark PRO'}
+                </button>
+                <button
+                  type="button"
+                  className="summary-toggle admin-remove-btn"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    onAdminDeleteItem?.(itemUrl, item.title)
+                  }}
+                  title="Admin: Permanently remove this published post from the website"
+                >
+                  🗑️ Take down
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -289,8 +374,16 @@ export default function FeedRow({
             onChange={(e) => setNoteDraft(e.target.value)}
             autoFocus
           />
-          <label className="edit-label" style={{ marginTop: '0.5rem' }}>
-            Custom summary override (saved to your section):
+          <label className="edit-label" style={{ marginTop: '0.5rem', display: 'flex', justifyContent: 'space-between' }}>
+            <span>Custom summary override (saved to your section):</span>
+            {!hasProAccess && (
+              <span
+                style={{ color: 'var(--accent)', cursor: 'pointer' }}
+                onClick={() => onOpenUpgradeModal?.('Custom summary rewriting is a Signal PRO feature.')}
+              >
+                🔒 PRO feature (Upgrade)
+              </span>
+            )}
           </label>
           <textarea
             className="modal-input"
@@ -298,6 +391,8 @@ export default function FeedRow({
             placeholder="Customize the short summary for your saved list…"
             value={summaryDraft}
             onChange={(e) => setSummaryDraft(e.target.value)}
+            disabled={!hasProAccess}
+            style={!hasProAccess ? { opacity: 0.55, cursor: 'not-allowed' } : {}}
           />
           <div className="edit-actions">
             <button type="button" className="btn" onClick={() => setEditingNote(false)}>
@@ -310,7 +405,7 @@ export default function FeedRow({
         </div>
       )}
 
-      {expanded && (
+      {expanded && !isLockedForFreeUser && (
         <div className="summary-box">
           {loadingSummary && 'Generating 50-word summary…'}
           {summaryError && <span style={{ color: '#e08080' }}>{summaryError}</span>}
@@ -318,7 +413,7 @@ export default function FeedRow({
             <>
               <div dangerouslySetInnerHTML={{ __html: summary }} />
 
-              {/* Subtle Idea Network teaser line below the 50w summary */}
+              {/* Idea Network & AI Chat bar below the 50w summary */}
               <div
                 style={{
                   marginTop: '0.75rem',
@@ -346,9 +441,19 @@ export default function FeedRow({
                       borderColor: 'var(--accent)',
                       color: 'var(--accent)',
                     }}
-                    onClick={() => setIdeateOpen(!ideateOpen)}
+                    onClick={() => {
+                      if (!hasProAccess) {
+                        onOpenUpgradeModal?.('Connect & Brainstorm (4-Point Idea Network Blueprint) is locked on Free accounts. Upgrade to PRO to unlock!')
+                        return
+                      }
+                      setIdeateOpen(!ideateOpen)
+                    }}
                   >
-                    {ideateOpen ? '▾ Hide Idea Network' : '✨ Connect & Brainstorm →'}
+                    {!hasProAccess
+                      ? '🔒 Connect & Brainstorm (PRO)'
+                      : ideateOpen
+                      ? '▾ Hide Idea Network'
+                      : '✨ Connect & Brainstorm →'}
                   </button>
                   {onOpenInChat && (
                     <button
@@ -360,7 +465,11 @@ export default function FeedRow({
                         borderColor: 'var(--idea)',
                         color: 'var(--idea)',
                       }}
-                      onClick={() =>
+                      onClick={() => {
+                        if (!hasProAccess) {
+                          onOpenUpgradeModal?.('Multi-turn AI Builder Chat is a Signal PRO feature.')
+                          return
+                        }
                         onOpenInChat({
                           item,
                           summary: summary || item.summary || '',
@@ -373,15 +482,15 @@ export default function FeedRow({
                             creativityMode,
                           },
                         })
-                      }
+                      }}
                     >
-                      💬 Continue in AI Chat →
+                      {!hasProAccess ? '🔒 Continue in AI Chat (PRO)' : '💬 Continue in AI Chat →'}
                     </button>
                   )}
                 </div>
               </div>
 
-              {ideateOpen && (
+              {ideateOpen && hasProAccess && (
                 <div
                   style={{
                     marginTop: '0.65rem',
