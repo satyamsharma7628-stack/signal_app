@@ -211,6 +211,7 @@ export function generateIdeaNetwork(item, profileInputs) {
     { retries: 1 }
   )
 }
+
 export function sendBuilderChatMessage(messages, contextItem = null, userProfile = null) {
   let userKey = ''
   try {
@@ -230,5 +231,51 @@ export function sendBuilderChatMessage(messages, contextItem = null, userProfile
       }),
     },
     { retries: 1 }
+  )
+}
+
+// ── Admin Moderation & Account Access Control Endpoints ─────────────────────
+
+export function claimAdminOrSwitchTier(adminSecret = '', targetTier = 'admin') {
+  return fetchWithRetry(
+    '/api/admin/claim',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        admin_secret: adminSecret,
+        target_tier: targetTier,
+      }),
+    },
+    { retries: 0 }
+  )
+}
+
+export function adminGetUsers() {
+  return fetchWithRetry('/api/admin/users', {}, { retries: 1 })
+}
+
+export function adminUpdateUserTier({ userId = null, email = null, tier = 'free' }) {
+  return fetchWithRetry(
+    '/api/admin/users/tier',
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: userId,
+        email,
+        tier,
+      }),
+    },
+    { retries: 0 }
+  )
+}
+
+export function adminDeleteFeedItem(url) {
+  const q = new URLSearchParams({ url })
+  return fetchWithRetry(
+    `/api/admin/items?${q.toString()}`,
+    { method: 'DELETE' },
+    { retries: 0 }
   )
 }
