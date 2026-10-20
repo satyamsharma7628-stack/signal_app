@@ -1,7 +1,7 @@
 """
 Supabase data access layer with automatic local SQLite fallback (signal.db).
-Includes feed items, summary cache, user profiles, saved items, and cached
-Daily/Weekly newsletter issues.
+Includes feed items, summary cache, user profiles (free / pro / admin / suspended),
+saved items, cached Daily/Weekly newsletter issues, and Admin moderation helpers.
 """
 import os
 import json
@@ -20,6 +20,14 @@ _use_sqlite: bool = False
 
 JSON_LIST_COLUMNS = ("stack_tags", "dept", "preferred_depts", "preferred_sources", "items")
 BOOL_COLUMNS = ("is_builder_idea", "daily_newsletter", "weekly_newsletter")
+
+# In-memory set of removed item URLs so background scrapes don't re-insert moderated posts
+_removed_urls_mem: set[str] = set()
+
+
+def _get_admin_emails() -> set[str]:
+    raw = os.environ.get("ADMIN_EMAILS", "")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
 class SQLiteQueryBuilder:
@@ -291,28 +299,29 @@ def save_items(items: list[NewsItem]) -> int:
     if not items:
         return 0
     client = get_client()
-    rows = [_item_to_row(i) for i in items]
+    rows = [
+        _item_to_row(i)
+        for i in items
+        if i.url not in _removed_urls_mem
+    ]
     CHUNK = 200
     saved = 0
     for i in range(0, len(rows), CHUNK):
         chunk = rows[i:i + CHUNK]
         client.table("items").upsert(chunk, on_conflict="url").execute()
         saved += len(chunk)
-    # Invalidate in-memory cache on write
     _items_mem_cache = []
     _items_mem_cache_ts = 0.0
     return saved
 
 
 def load_items() -> list[dict]:
-    """Reads back every item, newest first, with a 60-second in-memory cache
-    so /api/ideate, /api/items, and /api/status respond in <5ms instead of
-    downloading 1,000+ rows from Supabase on every click."""
+    """Reads back every item, newest first, with a 60-second in-memory cache."""
     global _items_mem_cache, _items_mem_cache_ts
     import time as _time
     now = _time.time()
     if _items_mem_cache and (now - _items_mem_cache_ts) < ITEMS_CACHE_TTL_SEC:
-        return _items_mem_cache
+        return [i for i in _items_mem_cache if i.get("url") not in _removed_urls_mem]
 
     client = get_client()
     result = (
@@ -322,7 +331,10 @@ def load_items() -> list[dict]:
         .limit(2000)
         .execute()
     )
-    data = result.data or []
+    data = [
+        row for row in (result.data or [])
+        if row.get("url") not in _removed_urls_mem
+    ]
     if data:
         _items_mem_cache = data
         _items_mem_cache_ts = now
@@ -391,7 +403,9 @@ def verify_user_token(token: str) -> Optional[dict]:
 def get_or_create_user_profile(user_info: dict) -> dict:
     client = get_client()
     user_id = user_info["user_id"]
+    email_lower = (user_info.get("email") or "").strip().lower()
     now_iso = datetime.now(timezone.utc).isoformat()
+    admin_emails = _get_admin_emails()
 
     existing = (
         client.table("user_profiles")
@@ -400,16 +414,37 @@ def get_or_create_user_profile(user_info: dict) -> dict:
         .limit(1)
         .execute()
     )
+
+    # Also check if an admin pre-granted access by email address before the user signed up
+    pregranted_tier = None
+    if not existing.data and email_lower:
+        by_email = (
+            client.table("user_profiles")
+            .select("*")
+            .eq("email", email_lower)
+            .limit(1)
+            .execute()
+        )
+        if by_email.data:
+            pregranted_row = by_email.data[0]
+            pregranted_tier = pregranted_row.get("subscription_tier")
+            # Remove placeholder row if it had a pregrant_ user_id
+            if str(pregranted_row.get("user_id", "")).startswith("pregrant_"):
+                client.table("user_profiles").delete().eq("user_id", pregranted_row["user_id"]).execute()
+
     if existing.data:
         profile = existing.data[0]
+        current_tier = profile.get("subscription_tier") or "free"
+        if email_lower in admin_emails and current_tier != "suspended":
+            current_tier = "admin"
         updated_fields = {
             "user_id": user_id,
-            "email": user_info.get("email") or profile.get("email", ""),
+            "email": email_lower or profile.get("email", ""),
             "full_name": user_info.get("full_name") or profile.get("full_name", ""),
             "avatar_url": user_info.get("avatar_url") or profile.get("avatar_url", ""),
             "preferred_depts": profile.get("preferred_depts") or [],
             "preferred_sources": profile.get("preferred_sources") or [],
-            "subscription_tier": profile.get("subscription_tier") or "free",
+            "subscription_tier": current_tier,
             "daily_newsletter": bool(profile.get("daily_newsletter", True)),
             "weekly_newsletter": bool(profile.get("weekly_newsletter", False)),
             "created_at": profile.get("created_at") or now_iso,
@@ -418,16 +453,17 @@ def get_or_create_user_profile(user_info: dict) -> dict:
         client.table("user_profiles").upsert(updated_fields, on_conflict="user_id").execute()
         return updated_fields
 
+    initial_tier = "admin" if email_lower in admin_emails else (pregranted_tier or "free")
     new_profile = {
         "user_id": user_id,
-        "email": user_info.get("email", ""),
+        "email": email_lower,
         "full_name": user_info.get("full_name", ""),
         "avatar_url": user_info.get("avatar_url", ""),
         "preferred_depts": [],
         "preferred_sources": [],
-        "subscription_tier": "free",
+        "subscription_tier": initial_tier,
         "daily_newsletter": True,
-        "weekly_newsletter": False,
+        "weekly_newsletter": initial_tier in ("pro", "admin"),
         "created_at": now_iso,
         "updated_at": now_iso,
     }
@@ -495,7 +531,9 @@ def list_newsletter_subscribers(kind: str = "daily") -> list[dict]:
         .limit(5000)
         .execute()
     )
-    return res.data or []
+    rows = res.data or []
+    # Do not send emails to suspended accounts
+    return [r for r in rows if r.get("subscription_tier") != "suspended"]
 
 
 def get_newsletter_issue(issue_key: str) -> Optional[dict]:
@@ -569,4 +607,85 @@ def delete_saved_item(user_id: str, item_url: str) -> bool:
         .eq("item_url", item_url)
         .execute()
     )
+    return True
+
+
+# ── Admin Moderation & Account Management Helpers ───────────────────────────
+
+def admin_list_users() -> list[dict]:
+    """Returns all user profiles ordered by newest first for the Admin Console."""
+    client = get_client()
+    res = (
+        client.table("user_profiles")
+        .select("*")
+        .order("updated_at", desc=True)
+        .limit(1000)
+        .execute()
+    )
+    return res.data or []
+
+
+def admin_set_user_tier(
+    target_user_id: Optional[str] = None,
+    target_email: Optional[str] = None,
+    new_tier: str = "free",
+) -> dict:
+    """Allows an Admin to grant FREE, PRO, ADMIN, or SUSPENDED status to an existing
+    account (or pre-authorize an email address before they even sign up)."""
+    valid_tiers = {"free", "pro", "admin", "suspended"}
+    tier_clean = new_tier.strip().lower()
+    if tier_clean not in valid_tiers:
+        raise ValueError(f"Invalid tier '{new_tier}'. Must be one of: {', '.join(sorted(valid_tiers))}")
+
+    client = get_client()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    existing_row = None
+
+    if target_user_id:
+        res = client.table("user_profiles").select("*").eq("user_id", target_user_id).limit(1).execute()
+        if res.data:
+            existing_row = res.data[0]
+
+    if not existing_row and target_email:
+        email_clean = target_email.strip().lower()
+        res = client.table("user_profiles").select("*").eq("email", email_clean).limit(1).execute()
+        if res.data:
+            existing_row = res.data[0]
+        else:
+            # Pre-create profile for this email so they get PRO/ADMIN/SUSPENDED as soon as they log in
+            existing_row = {
+                "user_id": f"pregrant_{email_clean}",
+                "email": email_clean,
+                "full_name": email_clean.split("@")[0],
+                "avatar_url": "",
+                "preferred_depts": [],
+                "preferred_sources": [],
+                "daily_newsletter": True,
+                "weekly_newsletter": tier_clean in ("pro", "admin"),
+                "created_at": now_iso,
+            }
+
+    if not existing_row:
+        raise ValueError("User account not found. Provide a valid user_id or email address.")
+
+    updated = {
+        **existing_row,
+        "subscription_tier": tier_clean,
+        "updated_at": now_iso,
+    }
+    client.table("user_profiles").upsert(updated, on_conflict="user_id").execute()
+    return updated
+
+
+def admin_delete_item(url: str) -> bool:
+    """Removes a published post from the database and caches its URL in _removed_urls_mem
+    so it disappears immediately from all feeds."""
+    global _items_mem_cache, _items_mem_cache_ts
+    if not url:
+        return False
+    _removed_urls_mem.add(url)
+    client = get_client()
+    client.table("items").delete().eq("url", url).execute()
+    client.table("summary_cache").delete().eq("url", url).execute()
+    _items_mem_cache = [i for i in _items_mem_cache if i.get("url") != url]
     return True
