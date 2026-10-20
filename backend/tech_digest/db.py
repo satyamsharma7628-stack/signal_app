@@ -291,18 +291,46 @@ def _item_to_row(item: NewsItem) -> dict:
 
 _items_mem_cache: list[dict] = []
 _items_mem_cache_ts: float = 0.0
+_removed_loaded_from_db: bool = False
 ITEMS_CACHE_TTL_SEC = 60.0
+ADMIN_REMOVED_MARKER = "__ADMIN_REMOVED__"
+
+
+def _sync_removed_urls_from_db() -> set[str]:
+    """Loads persistent admin-removed URLs stored in summary_cache (with
+    summary == '__ADMIN_REMOVED__') so takedowns survive Render restarts."""
+    global _removed_loaded_from_db, _removed_urls_mem
+    if _removed_loaded_from_db:
+        return _removed_urls_mem
+    try:
+        client = get_client()
+        res = (
+            client.table("summary_cache")
+            .select("url")
+            .eq("summary", ADMIN_REMOVED_MARKER)
+            .limit(2000)
+            .execute()
+        )
+        for row in (res.data or []):
+            u = row.get("url")
+            if u:
+                _removed_urls_mem.add(u)
+        _removed_loaded_from_db = True
+    except Exception as e:
+        print(f"[db] Warning loading removed URLs tombstone list: {e}")
+    return _removed_urls_mem
 
 
 def save_items(items: list[NewsItem]) -> int:
     global _items_mem_cache, _items_mem_cache_ts
     if not items:
         return 0
+    removed_set = _sync_removed_urls_from_db()
     client = get_client()
     rows = [
         _item_to_row(i)
         for i in items
-        if i.url not in _removed_urls_mem
+        if i.url not in removed_set
     ]
     CHUNK = 200
     saved = 0
@@ -316,12 +344,14 @@ def save_items(items: list[NewsItem]) -> int:
 
 
 def load_items() -> list[dict]:
-    """Reads back every item, newest first, with a 60-second in-memory cache."""
+    """Reads back every item, newest first, with a 60-second in-memory cache
+    and persistent admin takedown filtering."""
     global _items_mem_cache, _items_mem_cache_ts
     import time as _time
+    removed_set = _sync_removed_urls_from_db()
     now = _time.time()
     if _items_mem_cache and (now - _items_mem_cache_ts) < ITEMS_CACHE_TTL_SEC:
-        return [i for i in _items_mem_cache if i.get("url") not in _removed_urls_mem]
+        return [i for i in _items_mem_cache if i.get("url") not in removed_set]
 
     client = get_client()
     result = (
@@ -333,12 +363,31 @@ def load_items() -> list[dict]:
     )
     data = [
         row for row in (result.data or [])
-        if row.get("url") not in _removed_urls_mem
+        if row.get("url") not in removed_set
     ]
     if data:
         _items_mem_cache = data
         _items_mem_cache_ts = now
     return data
+
+
+def get_item_by_url(url: str) -> Optional[dict]:
+    """Looks up a single feed item by URL from the 60s cache or database so
+    /api/summary can verify the URL belongs to a real feed item and use
+    server-trusted existing_summary."""
+    if not url or url in _sync_removed_urls_from_db():
+        return None
+    for item in load_items():
+        if item.get("url") == url:
+            return item
+    try:
+        client = get_client()
+        res = client.table("items").select("*").eq("url", url).limit(1).execute()
+        if res.data:
+            return res.data[0]
+    except Exception:
+        pass
+    return None
 
 
 # ── User Authentication & Personal Section Helpers ──────────────────────────
@@ -377,9 +426,15 @@ def verify_user_token(token: str) -> Optional[dict]:
         user = getattr(res, "user", None)
         if user and getattr(user, "id", None):
             meta = getattr(user, "user_metadata", {}) or {}
+            confirmed_at = (
+                getattr(user, "email_confirmed_at", None)
+                or getattr(user, "confirmed_at", None)
+                or meta.get("email_verified")
+            )
             return {
                 "user_id": str(user.id),
                 "email": (user.email or "").lower(),
+                "email_confirmed": bool(confirmed_at),
                 "full_name": (meta.get("full_name") or meta.get("name") or (user.email or "").split("@")[0])[:100],
                 "avatar_url": (meta.get("avatar_url") or meta.get("picture") or "")[:500],
             }
@@ -393,6 +448,7 @@ def get_or_create_user_profile(user_info: dict) -> dict:
     client = get_client()
     user_id = user_info["user_id"]
     email_lower = (user_info.get("email") or "").strip().lower()
+    email_confirmed = bool(user_info.get("email_confirmed", False))
     now_iso = datetime.now(timezone.utc).isoformat()
     admin_emails = _get_admin_emails()
 
@@ -404,9 +460,9 @@ def get_or_create_user_profile(user_info: dict) -> dict:
         .execute()
     )
 
-    # Also check if an admin pre-granted access by email address before the user signed up
+    # Only match pre-granted tiers or ADMIN_EMAILS when the email is confirmed
     pregranted_tier = None
-    if not existing.data and email_lower:
+    if not existing.data and email_lower and email_confirmed:
         by_email = (
             client.table("user_profiles")
             .select("*")
@@ -417,14 +473,13 @@ def get_or_create_user_profile(user_info: dict) -> dict:
         if by_email.data:
             pregranted_row = by_email.data[0]
             pregranted_tier = pregranted_row.get("subscription_tier")
-            # Remove placeholder row if it had a pregrant_ user_id
             if str(pregranted_row.get("user_id", "")).startswith("pregrant_"):
                 client.table("user_profiles").delete().eq("user_id", pregranted_row["user_id"]).execute()
 
     if existing.data:
         profile = existing.data[0]
         current_tier = profile.get("subscription_tier") or "free"
-        if email_lower in admin_emails and current_tier != "suspended":
+        if email_confirmed and email_lower in admin_emails and current_tier != "suspended":
             current_tier = "admin"
         updated_fields = {
             "user_id": user_id,
@@ -442,7 +497,11 @@ def get_or_create_user_profile(user_info: dict) -> dict:
         client.table("user_profiles").upsert(updated_fields, on_conflict="user_id").execute()
         return updated_fields
 
-    initial_tier = "admin" if email_lower in admin_emails else (pregranted_tier or "free")
+    initial_tier = (
+        "admin"
+        if (email_confirmed and email_lower in admin_emails)
+        else (pregranted_tier if email_confirmed and pregranted_tier else "free")
+    )
     new_profile = {
         "user_id": user_id,
         "email": email_lower,
@@ -667,14 +726,22 @@ def admin_set_user_tier(
 
 
 def admin_delete_item(url: str) -> bool:
-    """Removes a published post from the database and caches its URL in _removed_urls_mem
-    so it disappears immediately from all feeds."""
+    """Removes a published post from `items` and records a persistent tombstone
+    (`summary = '__ADMIN_REMOVED__'`) in `summary_cache` so the takedown survives
+    Render restarts and future feed fetches."""
     global _items_mem_cache, _items_mem_cache_ts
     if not url:
         return False
     _removed_urls_mem.add(url)
     client = get_client()
     client.table("items").delete().eq("url", url).execute()
-    client.table("summary_cache").delete().eq("url", url).execute()
+    client.table("summary_cache").upsert(
+        {
+            "url": url,
+            "summary": ADMIN_REMOVED_MARKER,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+        on_conflict="url",
+    ).execute()
     _items_mem_cache = [i for i in _items_mem_cache if i.get("url") != url]
     return True
