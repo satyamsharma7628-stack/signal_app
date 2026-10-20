@@ -344,19 +344,28 @@ def load_items() -> list[dict]:
 # ── User Authentication & Personal Section Helpers ──────────────────────────
 
 def verify_user_token(token: str) -> Optional[dict]:
-    if not token:
+    """Cryptographically verifies the user's Supabase JWT via Supabase Auth.
+    Security hardening:
+    - Never trusts unsigned base64 JWT payloads (prevents forged token attacks).
+    - Disables `demo:` tokens in production when Supabase is configured unless
+      ALLOW_DEMO_AUTH=true is explicitly set.
+    """
+    if not token or len(token) > 4096:
         return None
 
     client = get_client()
 
     if token.startswith("demo:"):
+        allow_demo = _use_sqlite or os.environ.get("ALLOW_DEMO_AUTH", "").lower() == "true"
+        if not allow_demo:
+            return None
         parts = token.split(":", 2)
         email = parts[1] if len(parts) > 1 and parts[1] else "demo@signal.local"
         name = parts[2] if len(parts) > 2 and parts[2] else email.split("@")[0].title()
         return {
             "user_id": f"demo_{email.lower()}",
             "email": email.lower(),
-            "full_name": name,
+            "full_name": name[:80],
             "avatar_url": "",
         }
 
@@ -366,37 +375,17 @@ def verify_user_token(token: str) -> Optional[dict]:
     try:
         res = client.auth.get_user(token)
         user = getattr(res, "user", None)
-        if user:
+        if user and getattr(user, "id", None):
             meta = getattr(user, "user_metadata", {}) or {}
             return {
                 "user_id": str(user.id),
-                "email": user.email or "",
-                "full_name": meta.get("full_name") or meta.get("name") or (user.email or "").split("@")[0],
-                "avatar_url": meta.get("avatar_url") or meta.get("picture") or "",
+                "email": (user.email or "").lower(),
+                "full_name": (meta.get("full_name") or meta.get("name") or (user.email or "").split("@")[0])[:100],
+                "avatar_url": (meta.get("avatar_url") or meta.get("picture") or "")[:500],
             }
     except Exception as e:
-        print(f"[auth] Supabase get_user check warning: {e}")
+        print(f"[auth] Supabase token verification rejected: {e}")
 
-    # Fallback: decode Supabase JWT payload so a slightly stale 1-hour access token
-    # doesn't block user saves/notes before the frontend refreshes it.
-    try:
-        import base64
-        parts = token.split(".")
-        if len(parts) == 3:
-            padded = parts[1] + "=" * (-len(parts[1]) % 4)
-            payload = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8"))
-            sub = payload.get("sub")
-            email = payload.get("email") or ""
-            if sub and email:
-                meta = payload.get("user_metadata") or {}
-                return {
-                    "user_id": str(sub),
-                    "email": email,
-                    "full_name": meta.get("full_name") or meta.get("name") or email.split("@")[0],
-                    "avatar_url": meta.get("avatar_url") or meta.get("picture") or "",
-                }
-    except Exception as e:
-        print(f"[auth] JWT decode fallback failed: {e}")
     return None
 
 
