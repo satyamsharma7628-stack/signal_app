@@ -20,6 +20,7 @@ jobs:
       - name: Wake backend & trigger newsletter dispatch
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
           if [ -z "$BACKEND_URL" ]; then
             echo "BACKEND_URL secret not set yet -- skipping"
@@ -27,7 +28,7 @@ jobs:
           fi
           # Wake up Render instance if sleeping
           curl -sS --retry 5 --retry-delay 10 --max-time 60 "$BACKEND_URL/api/health" || true
-          
+
           # Determine whether to trigger daily or weekly
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             KIND="${{ github.event.inputs.kind }}"
@@ -36,6 +37,8 @@ jobs:
           else
             KIND="daily"
           fi
-          
+
           echo "Triggering $KIND newsletter dispatch..."
-          curl -sS -X POST --max-time 60 "$BACKEND_URL/api/newsletter/dispatch?kind=$KIND"
+          curl -f -sS -X POST \
+            -H "X-Cron-Secret: $CRON_SECRET" \
+            --max-time 60 "$BACKEND_URL/api/newsletter/dispatch?kind=$KIND"
