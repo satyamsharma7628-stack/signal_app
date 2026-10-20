@@ -15,6 +15,10 @@ import {
   saveUserItem,
   removeSavedItem,
   sendBuilderChatMessage,
+  claimAdminOrSwitchTier,
+  adminGetUsers,
+  adminUpdateUserTier,
+  adminDeleteFeedItem,
 } from './api'
 import { supabase, isSupabaseConfigured } from './supabaseClient'
 
@@ -23,6 +27,11 @@ const DEMO_TOKEN_KEY = 'signal_demo_auth_token'
 const CHAT_HISTORY_KEY = 'signal_ai_chat_threads_v1'
 const LOCAL_NICHES_KEY = 'signal_preferred_depts_backup'
 const LOCAL_SAVED_FALLBACK_KEY = 'signal_saved_items_guest'
+const LOCAL_TIER_OVERRIDE_KEY = 'signal_local_tier_override'
+const CUSTOM_PRO_URLS_KEY = 'signal_admin_custom_pro_urls'
+
+const FREE_MAX_NICHES = 3
+const FREE_MAX_SAVED = 15
 
 const DEPT_META = {
   'cybersecurity':   { label: '🔒 Cybersecurity',   color: '#e07070' },
@@ -101,6 +110,22 @@ function loadStoredChatThreads() {
   ]
 }
 
+// Deterministically marks ~1 in 5 high-signal builder/research drops as PRO content
+// (plus any URLs explicitly toggled by Admin) so FREE accounts see locked PRO drops.
+function isItemProExclusive(item, idx, customProMap) {
+  const url = item.url || item.item_url || ''
+  if (url && customProMap && url in customProMap) {
+    return Boolean(customProMap[url])
+  }
+  if (item.is_builder_idea && (item.engagement_raw || 0) >= 80 && idx % 4 === 2) {
+    return true
+  }
+  if (item.tier === 1 && idx % 6 === 4) {
+    return true
+  }
+  return false
+}
+
 export default function App() {
   const [theme, setTheme] = useState('dark')
   const [status, setStatus] = useState(null)
@@ -110,8 +135,15 @@ export default function App() {
   const [retryInfo, setRetryInfo] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
 
-  // Auth, Niches & Saved Items state (initialized from localStorage so mobile works immediately)
+  // Auth, Niches & Saved Items state
   const [userProfile, setUserProfile] = useState(null)
+  const [localTierOverride, setLocalTierOverride] = useState(() => {
+    try {
+      return localStorage.getItem(LOCAL_TIER_OVERRIDE_KEY) || ''
+    } catch {
+      return ''
+    }
+  })
   const [localNiches, setLocalNiches] = useState(() => loadLocalNiches())
   const [savedItems, setSavedItems] = useState(() => {
     try {
@@ -122,7 +154,32 @@ export default function App() {
     }
   })
 
-  // Active tab: 'feed' | 'ideas' | 'my-feed' | 'saved' | 'chat'
+  // PRO Upgrade / Tier Switcher Modal state
+  const [upgradeModalOpen, setUpgradeModalOpen] = useState(false)
+  const [upgradeReason, setUpgradeReason] = useState('')
+  const [adminSecretInput, setAdminSecretInput] = useState('')
+  const [tierActionMsg, setTierActionMsg] = useState('')
+  const [tierActionErr, setTierActionErr] = useState('')
+  const [switchingTier, setSwitchingTier] = useState(false)
+
+  // Admin Console state
+  const [adminUsers, setAdminUsers] = useState([])
+  const [loadingAdminUsers, setLoadingAdminUsers] = useState(false)
+  const [adminUserSearch, setAdminUserSearch] = useState('')
+  const [adminGrantEmail, setAdminGrantEmail] = useState('')
+  const [adminGrantTier, setAdminGrantTier] = useState('pro')
+  const [adminPostSearch, setAdminPostSearch] = useState('')
+  const [adminStatusBanner, setAdminStatusBanner] = useState('')
+  const [customProMap, setCustomProMap] = useState(() => {
+    try {
+      const raw = localStorage.getItem(CUSTOM_PRO_URLS_KEY)
+      return raw ? JSON.parse(raw) : {}
+    } catch {
+      return {}
+    }
+  })
+
+  // Active tab: 'feed' | 'ideas' | 'my-feed' | 'saved' | 'chat' | 'admin'
   const [activeTab, setActiveTab] = useState('feed')
   const [search, setSearch] = useState('')
   const [source, setSource] = useState('')
@@ -131,7 +188,7 @@ export default function App() {
   const [sort, setSort] = useState('newest')
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
 
-  // AI Builder Chat state with persistent thread history
+  // AI Builder Chat state
   const [chatThreads, setChatThreads] = useState(() => loadStoredChatThreads())
   const [activeThreadId, setActiveThreadId] = useState(() => loadStoredChatThreads()[0]?.id || 'thread-welcome')
   const [chatInput, setChatInput] = useState('')
@@ -147,9 +204,26 @@ export default function App() {
     } catch {}
   }, [chatThreads])
 
+  // Effective tier: 'free' | 'pro' | 'admin' | 'suspended'
+  const effectiveTier = useMemo(() => {
+    if (userProfile?.subscription_tier === 'suspended') return 'suspended'
+    const serverTier = (userProfile?.subscription_tier || '').toLowerCase()
+    if (localTierOverride && ['free', 'pro', 'admin'].includes(localTierOverride)) {
+      return localTierOverride
+    }
+    if (['free', 'pro', 'admin'].includes(serverTier)) {
+      return serverTier
+    }
+    return 'free'
+  }, [userProfile, localTierOverride])
+
+  const hasProAccess = effectiveTier === 'pro' || effectiveTier === 'admin'
+  const isAdmin = effectiveTier === 'admin'
+  const isSuspended = effectiveTier === 'suspended'
+
   const activeNiches = useMemo(
     () =>
-      (userProfile?.preferred_depts && userProfile.preferred_depts.length > 0)
+      userProfile?.preferred_depts && userProfile.preferred_depts.length > 0
         ? userProfile.preferred_depts
         : localNiches,
     [userProfile, localNiches]
@@ -160,7 +234,135 @@ export default function App() {
     [chatThreads, activeThreadId]
   )
 
+  function openUpgradeModal(reason = '') {
+    setUpgradeReason(reason)
+    setTierActionMsg('')
+    setTierActionErr('')
+    setUpgradeModalOpen(true)
+  }
+
+  async function handleSelectTierMode(targetTier, requireSecret = false) {
+    setTierActionMsg('')
+    setTierActionErr('')
+    if (requireSecret && !adminSecretInput.trim() && effectiveTier !== 'admin') {
+      setTierActionErr('Enter the Admin Passcode (default: signal-admin-2026) to unlock Admin mode.')
+      return
+    }
+    setSwitchingTier(true)
+    try {
+      if (userProfile) {
+        const res = await claimAdminOrSwitchTier(adminSecretInput.trim() || 'signal-admin-2026', targetTier)
+        if (res?.profile) {
+          setUserProfile(res.profile)
+        }
+      }
+      setLocalTierOverride(targetTier)
+      try {
+        localStorage.setItem(LOCAL_TIER_OVERRIDE_KEY, targetTier)
+      } catch {}
+      setTierActionMsg(`Switched account view to ${targetTier.toUpperCase()}!`)
+      if (targetTier === 'admin') {
+        loadAdminUsersList()
+      }
+    } catch (err) {
+      // If not signed in or secret mismatch when claiming admin with default key locally
+      if (!requireSecret || adminSecretInput.trim() === 'signal-admin-2026') {
+        setLocalTierOverride(targetTier)
+        try {
+          localStorage.setItem(LOCAL_TIER_OVERRIDE_KEY, targetTier)
+        } catch {}
+        setUserProfile((prev) => (prev ? { ...prev, subscription_tier: targetTier } : prev))
+        setTierActionMsg(`Activated ${targetTier.toUpperCase()} mode!`)
+      } else {
+        setTierActionErr(err.message || 'Could not change tier.')
+      }
+    } finally {
+      setSwitchingTier(false)
+    }
+  }
+
+  async function loadAdminUsersList() {
+    setLoadingAdminUsers(true)
+    try {
+      const res = await adminGetUsers()
+      setAdminUsers(res.users || [])
+    } catch (err) {
+      console.warn('Could not load admin users list:', err)
+    } finally {
+      setLoadingAdminUsers(false)
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === 'admin' && isAdmin) {
+      loadAdminUsersList()
+    }
+  }, [activeTab, isAdmin])
+
+  async function handleAdminSetUserTier(targetUser, nextTier) {
+    setAdminStatusBanner('')
+    try {
+      const res = await adminUpdateUserTier({
+        userId: targetUser.user_id,
+        email: targetUser.email,
+        tier: nextTier,
+      })
+      const updatedUser = res.user
+      setAdminUsers((prev) => {
+        const exists = prev.some((u) => u.user_id === updatedUser.user_id || u.email === updatedUser.email)
+        if (exists) {
+          return prev.map((u) =>
+            u.user_id === updatedUser.user_id || u.email === updatedUser.email ? updatedUser : u
+          )
+        }
+        return [updatedUser, ...prev]
+      })
+      setAdminStatusBanner(`Updated ${updatedUser.email} → ${nextTier.toUpperCase()}`)
+    } catch (err) {
+      setAdminStatusBanner(`Error: ${err.message || 'Could not update user tier.'}`)
+    }
+  }
+
+  async function handleAdminGrantByEmail(e) {
+    e.preventDefault()
+    if (!adminGrantEmail.trim()) return
+    await handleAdminSetUserTier({ email: adminGrantEmail.trim() }, adminGrantTier)
+    setAdminGrantEmail('')
+  }
+
+  async function handleAdminDeleteItem(url, title = '') {
+    if (!url) return
+    setItems((prev) => prev.filter((i) => (i.url || i.item_url) !== url))
+    setAdminStatusBanner(`Removed published post: "${title || url}"`)
+    try {
+      await adminDeleteFeedItem(url)
+    } catch (err) {
+      console.warn('Backend delete item warning:', err)
+    }
+  }
+
+  function handleAdminToggleProItem(url) {
+    if (!url) return
+    setCustomProMap((prev) => {
+      const idx = items.findIndex((i) => (i.url || i.item_url) === url)
+      const itemObj = items[idx] || {}
+      const currentlyPro = isItemProExclusive(itemObj, idx >= 0 ? idx : 0, prev)
+      const next = { ...prev, [url]: !currentlyPro }
+      try {
+        localStorage.setItem(CUSTOM_PRO_URLS_KEY, JSON.stringify(next))
+      } catch {}
+      setAdminStatusBanner(
+        `${!currentlyPro ? '🔒 Marked post as PRO-only' : '🔓 Marked post as Free for everyone'}`
+      )
+      return next
+    })
+  }
+
   function handleOpenInChat({ item, summary, blueprint, connectedNodes, profileInputs }) {
+    if (!hasProAccess) {
+      openUpgradeModal('Multi-Turn AI Builder Chat is a Signal PRO feature.')
+      return
+    }
     const existing = chatThreads.find((t) => t.contextItem?.url === (item.url || item.item_url))
     if (existing) {
       setActiveThreadId(existing.id)
@@ -239,6 +441,10 @@ export default function App() {
 
   async function handleSendChat(e, quickPrompt = '') {
     if (e) e.preventDefault()
+    if (!hasProAccess) {
+      openUpgradeModal('Upgrade to Signal PRO to send unlimited messages in AI Builder Chat.')
+      return
+    }
     const text = (quickPrompt || chatInput).trim()
     if (!text || !activeThread || sendingChat) return
 
@@ -326,7 +532,6 @@ export default function App() {
     }
     setAuthToken(token)
 
-    // Immediately populate userProfile from JWT token so mobile never waits on Render cold-start
     const instantProfile = decodeJwtProfileFallback(token)
     if (instantProfile) {
       setUserProfile((prev) => prev || instantProfile)
@@ -426,12 +631,20 @@ export default function App() {
     }
     try {
       localStorage.removeItem(DEMO_TOKEN_KEY)
+      localStorage.removeItem(LOCAL_TIER_OVERRIDE_KEY)
     } catch {}
+    setLocalTierOverride('')
     setAuthToken('')
     setUserProfile(null)
   }
 
   async function handleSaveNiches(depts) {
+    if (!hasProAccess && depts.length > FREE_MAX_NICHES) {
+      openUpgradeModal(
+        `Free accounts can follow up to ${FREE_MAX_NICHES} niches in ✨ My Feed. Upgrade to Signal PRO for unlimited niches!`
+      )
+      return
+    }
     setLocalNiches(depts)
     saveLocalNiches(depts)
     if (userProfile) {
@@ -454,6 +667,14 @@ export default function App() {
 
   async function handleSaveOrUpdateItem(item, customNote, editedSummary) {
     const itemUrl = item.url || item.item_url
+    const alreadySaved = savedItems.some((x) => x.item_url === itemUrl)
+    if (!alreadySaved && !hasProAccess && savedItems.length >= FREE_MAX_SAVED) {
+      openUpgradeModal(
+        `Free accounts can bookmark up to ${FREE_MAX_SAVED} items in 🔖 Saved & Notes. Upgrade to Signal PRO for unlimited saved items and custom summary overrides!`
+      )
+      throw new Error(`Free limit (${FREE_MAX_SAVED} saved items) reached — Upgrade to PRO`)
+    }
+
     const nowIso = new Date().toISOString()
     const optimisticRow = {
       user_id: userProfile?.user_id || 'local',
@@ -641,6 +862,30 @@ export default function App() {
 
   const visible = filtered.slice(0, visibleCount)
 
+  const filteredAdminUsers = useMemo(() => {
+    if (!adminUserSearch.trim()) return adminUsers
+    const q = adminUserSearch.toLowerCase()
+    return adminUsers.filter(
+      (u) =>
+        (u.email || '').toLowerCase().includes(q) ||
+        (u.full_name || '').toLowerCase().includes(q) ||
+        (u.subscription_tier || '').toLowerCase().includes(q)
+    )
+  }, [adminUsers, adminUserSearch])
+
+  const filteredAdminPosts = useMemo(() => {
+    if (!adminPostSearch.trim()) return items.slice(0, 40)
+    const q = adminPostSearch.toLowerCase()
+    return items
+      .filter(
+        (i) =>
+          (i.title || '').toLowerCase().includes(q) ||
+          (i.source || '').toLowerCase().includes(q) ||
+          (i.url || '').toLowerCase().includes(q)
+      )
+      .slice(0, 40)
+  }, [items, adminPostSearch])
+
   function switchTab(nextTab) {
     setActiveTab(nextTab)
     setSource('')
@@ -654,6 +899,27 @@ export default function App() {
     setVisibleCount(PAGE_SIZE)
   }
 
+  // If an admin has suspended / removed access for this user account
+  if (isSuspended) {
+    return (
+      <div className="app">
+        <div className="error-state" style={{ marginTop: '4rem', padding: '2.5rem 1.5rem' }}>
+          <h2 style={{ margin: '0 0 0.5rem', color: '#e08080' }}>🚫 Account Access Removed</h2>
+          <p style={{ maxWidth: 520, margin: '0 auto 1.2rem' }}>
+            Your account ({userProfile?.email}) has been suspended by a Signal administrator and no longer has access to the platform.
+          </p>
+          <button className="btn" onClick={handleSignOut}>
+            Sign out
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const profileWithEffectiveTier = userProfile
+    ? { ...userProfile, subscription_tier: effectiveTier }
+    : null
+
   return (
     <div className="app">
       <div className="app-header">
@@ -664,7 +930,7 @@ export default function App() {
         </div>
         <div className="header-actions">
           <UserMenu
-            userProfile={userProfile}
+            userProfile={profileWithEffectiveTier}
             deptMeta={DEPT_META}
             onSignInGoogle={handleSignInGoogle}
             onSignInEmail={handleSignInEmail}
@@ -674,7 +940,19 @@ export default function App() {
             onSaveNiches={handleSaveNiches}
             isSupabaseConfigured={isSupabaseConfigured}
           />
-          <NewsletterModal userProfile={userProfile} onProfileUpdate={setUserProfile} />
+          <button
+            type="button"
+            className={`icon-btn tier-header-btn tier-${effectiveTier}`}
+            onClick={() => openUpgradeModal('')}
+            title="View FREE vs PRO features or switch to Admin mode"
+          >
+            {effectiveTier === 'admin'
+              ? '🛡️ ADMIN'
+              : effectiveTier === 'pro'
+              ? '⭐ PRO ACTIVE'
+              : '⭐ Upgrade PRO'}
+          </button>
+          <NewsletterModal userProfile={profileWithEffectiveTier} onProfileUpdate={setUserProfile} />
           <ApiKeySettings />
           <button className="icon-btn" onClick={handleManualRefresh} disabled={refreshing}>
             {refreshing ? 'Refreshing…' : 'Refresh now'}
@@ -711,7 +989,7 @@ export default function App() {
         <>
           <KpiStrip items={items} />
 
-          {/* Always-visible tabs across desktop & mobile */}
+          {/* Always-visible tabs across desktop & mobile (+ Admin Console tab when ADMIN) */}
           <div className="tabs">
             <button
               className={`tab ${activeTab === 'feed' ? 'active' : ''}`}
@@ -729,128 +1007,337 @@ export default function App() {
               className={`tab ${activeTab === 'my-feed' ? 'active' : ''}`}
               onClick={() => switchTab('my-feed')}
             >
-              ✨ My Feed {activeNiches.length > 0 ? `(${activeNiches.length})` : ''}
+              ✨ My Feed {activeNiches.length > 0 ? `(${activeNiches.length}${!hasProAccess ? `/${FREE_MAX_NICHES}` : ''})` : ''}
             </button>
             <button
               className={`tab ${activeTab === 'saved' ? 'active' : ''}`}
               onClick={() => switchTab('saved')}
             >
-              🔖 Saved &amp; Notes ({savedItems.length})
+              🔖 Saved &amp; Notes ({savedItems.length}{!hasProAccess ? `/${FREE_MAX_SAVED}` : ''})
             </button>
             <button
               className={`tab ${activeTab === 'chat' ? 'active' : ''}`}
               onClick={() => switchTab('chat')}
             >
-              💬 AI Chat ({chatThreads.length})
+              {hasProAccess ? `💬 AI Chat (${chatThreads.length})` : '🔒 AI Chat (PRO)'}
             </button>
+            {isAdmin && (
+              <button
+                className={`tab tab-admin ${activeTab === 'admin' ? 'active' : ''}`}
+                onClick={() => switchTab('admin')}
+              >
+                🛡️ Admin Console
+              </button>
+            )}
           </div>
 
-          {activeTab === 'chat' ? (
-            <div className="chat-workspace">
-              <div className="chat-threads-list">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem' }}>
-                  <span style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                    CHAT HISTORY ({chatThreads.length})
-                  </span>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    style={{ padding: '0.25rem 0.6rem', fontSize: '0.74rem' }}
-                    onClick={handleStartBlankChat}
-                  >
-                    + New
-                  </button>
+          {/* ── ADMIN CONSOLE TAB ── */}
+          {activeTab === 'admin' && isAdmin ? (
+            <div className="admin-console">
+              <div className="admin-banner">
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '1rem' }}>🛡️ Signal Admin Moderation &amp; Access Control</h3>
+                  <p style={{ margin: '0.25rem 0 0', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                    Take down unwanted published content, lock/unlock PRO posts, grant FREE/PRO/ADMIN access, or suspend accounts.
+                  </p>
                 </div>
-                {chatThreads.map((t) => (
-                  <div
-                    key={t.id}
-                    className={`chat-thread-item ${t.id === activeThread?.id ? 'active' : ''}`}
-                    onClick={() => setActiveThreadId(t.id)}
-                  >
-                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem', fontWeight: 500 }}>
-                      {t.title}
-                    </div>
-                    <button
-                      type="button"
-                      className="thread-del-btn"
-                      onClick={(e) => handleDeleteThread(t.id, e)}
-                      title="Delete thread"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
+                <button className="btn" onClick={loadAdminUsersList} disabled={loadingAdminUsers}>
+                  {loadingAdminUsers ? 'Loading…' : '↻ Sync Users'}
+                </button>
               </div>
 
-              <div className="chat-main-pane">
-                <div className="chat-pane-header">
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{activeThread?.title}</div>
-                    {activeThread?.contextItem?.title && (
-                      <div style={{ fontSize: '0.74rem', color: 'var(--accent)' }}>
-                        Linked drop: {activeThread.contextItem.title}
-                      </div>
-                    )}
-                  </div>
-                  <button type="button" className="btn" style={{ fontSize: '0.75rem', padding: '0.3rem 0.65rem' }} onClick={() => switchTab('feed')}>
-                    ← Back to Feed
-                  </button>
+              {adminStatusBanner && (
+                <div className="personal-note-box" style={{ marginBottom: '0.85rem' }}>
+                  <b>Admin Action:</b> {adminStatusBanner}
                 </div>
+              )}
 
-                <div className="chat-messages-scroll">
-                  {(activeThread?.messages || []).map((m, idx) => (
-                    <div key={idx} className={`chat-bubble ${m.role === 'user' ? 'user' : 'assistant'}`}>
-                      <div className="chat-bubble-role">
-                        {m.role === 'user' ? 'You' : '▣ Signal AI'}
-                      </div>
-                      {m.role === 'user' ? (
-                        <div>{m.content}</div>
-                      ) : (
-                        <div dangerouslySetInnerHTML={{ __html: m.content }} />
-                      )}
-                    </div>
-                  ))}
-                  {sendingChat && (
-                    <div className="chat-bubble assistant">
-                      <div className="chat-bubble-role">▣ Signal AI</div>
-                      <div style={{ color: 'var(--text-muted)' }}>Thinking…</div>
-                    </div>
-                  )}
-                </div>
+              <div className="admin-grid">
+                {/* Panel 1: User Account Access Control */}
+                <div className="admin-card">
+                  <h4>👥 Account Access &amp; Tier Management</h4>
+                  <p className="modal-desc">
+                    Grant PRO or ADMIN access to any account (even before they sign up), downgrade to FREE, or suspend access.
+                  </p>
 
-                <div className="chat-quick-chips">
-                  {[
-                    'Give me the step-by-step MVP plan for a weekend',
-                    'What folder structure & database schema should I use?',
-                    'How can a beginner simplify this project?',
-                  ].map((q) => (
-                    <button
-                      key={q}
-                      type="button"
-                      className="dept-pill"
-                      onClick={(e) => handleSendChat(e, q)}
-                      disabled={sendingChat}
+                  <form onSubmit={handleAdminGrantByEmail} style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+                    <input
+                      type="email"
+                      className="modal-input"
+                      style={{ flex: 1, minWidth: '180px' }}
+                      placeholder="User email (e.g. user@gmail.com)"
+                      value={adminGrantEmail}
+                      onChange={(e) => setAdminGrantEmail(e.target.value)}
+                      required
+                    />
+                    <select
+                      className="modal-input"
+                      style={{ width: 'auto' }}
+                      value={adminGrantTier}
+                      onChange={(e) => setAdminGrantTier(e.target.value)}
                     >
-                      {q}
+                      <option value="pro">⭐ Grant PRO</option>
+                      <option value="free">Set FREE</option>
+                      <option value="admin">🛡️ Make ADMIN</option>
+                      <option value="suspended">🚫 Remove Access (Suspend)</option>
+                    </select>
+                    <button type="submit" className="btn btn-primary" style={{ padding: '0.45rem 0.85rem' }}>
+                      Apply
                     </button>
-                  ))}
-                </div>
+                  </form>
 
-                <form className="chat-input-row" onSubmit={handleSendChat}>
                   <input
                     type="text"
                     className="modal-input"
-                    placeholder="Ask follow-up questions about stack, code, prerequisites, or how to build this…"
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    disabled={sendingChat}
+                    placeholder="Filter registered users by email, name, or tier…"
+                    value={adminUserSearch}
+                    onChange={(e) => setAdminUserSearch(e.target.value)}
+                    style={{ marginBottom: '0.6rem' }}
                   />
-                  <button type="submit" className="btn btn-primary" disabled={sendingChat || !chatInput.trim()}>
-                    {sendingChat ? 'Sending…' : 'Send'}
-                  </button>
-                </form>
+
+                  <div className="admin-list-scroll">
+                    {filteredAdminUsers.length === 0 ? (
+                      <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', padding: '0.8rem 0' }}>
+                        {loadingAdminUsers
+                          ? 'Loading accounts…'
+                          : 'No accounts found yet. Use the email box above to pre-grant PRO or suspend any email.'}
+                      </div>
+                    ) : (
+                      filteredAdminUsers.map((u) => {
+                        const t = (u.subscription_tier || 'free').toLowerCase()
+                        return (
+                          <div key={u.user_id || u.email} className="admin-row-item">
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                              <div style={{ fontWeight: 600, fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                <span>{u.full_name || u.email}</span>
+                                <span className={`tier-badge ${t}`}>{t.toUpperCase()}</span>
+                              </div>
+                              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
+                                {u.email}
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ padding: '0.22rem 0.5rem', fontSize: '0.7rem' }}
+                                onClick={() => handleAdminSetUserTier(u, 'free')}
+                              >
+                                FREE
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ padding: '0.22rem 0.5rem', fontSize: '0.7rem', borderColor: 'var(--accent)', color: 'var(--accent)' }}
+                                onClick={() => handleAdminSetUserTier(u, 'pro')}
+                              >
+                                ⭐ PRO
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ padding: '0.22rem 0.5rem', fontSize: '0.7rem', borderColor: 'var(--idea)', color: 'var(--idea)' }}
+                                onClick={() => handleAdminSetUserTier(u, 'admin')}
+                              >
+                                🛡️ ADMIN
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{
+                                  padding: '0.22rem 0.5rem',
+                                  fontSize: '0.7rem',
+                                  borderColor: t === 'suspended' ? 'var(--good)' : '#e07070',
+                                  color: t === 'suspended' ? 'var(--good)' : '#e07070',
+                                }}
+                                onClick={() => handleAdminSetUserTier(u, t === 'suspended' ? 'free' : 'suspended')}
+                              >
+                                {t === 'suspended' ? '✅ Restore' : '🚫 Suspend'}
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })
+                    )}
+                  </div>
+                </div>
+
+                {/* Panel 2: Published Content Moderation */}
+                <div className="admin-card">
+                  <h4>📰 Published Content Moderation ({items.length} live)</h4>
+                  <p className="modal-desc">
+                    Search any published article below (or use the <b>🗑️ Take down</b> button directly on any feed card) to remove bad content immediately.
+                  </p>
+
+                  <input
+                    type="text"
+                    className="modal-input"
+                    placeholder="Search published posts by title, source, or URL…"
+                    value={adminPostSearch}
+                    onChange={(e) => setAdminPostSearch(e.target.value)}
+                    style={{ marginBottom: '0.6rem' }}
+                  />
+
+                  <div className="admin-list-scroll">
+                    {filteredAdminPosts.map((post, idx) => {
+                      const postUrl = post.url || post.item_url
+                      const isProPost = isItemProExclusive(post, idx, customProMap)
+                      return (
+                        <div key={postUrl} className="admin-row-item">
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontWeight: 600, fontSize: '0.8rem', lineHeight: 1.35 }}>
+                              {isProPost && <span className="chip chip-pro-lock" style={{ marginRight: 6 }}>🔒 PRO</span>}
+                              {post.title}
+                            </div>
+                            <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
+                              {post.source} · {post.category}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', gap: '0.35rem', flexShrink: 0 }}>
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ padding: '0.24rem 0.55rem', fontSize: '0.7rem', borderColor: 'var(--accent)', color: 'var(--accent)' }}
+                              onClick={() => handleAdminToggleProItem(postUrl)}
+                            >
+                              {isProPost ? '🔓 Free' : '🔒 PRO'}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ padding: '0.24rem 0.55rem', fontSize: '0.7rem', borderColor: '#e07070', color: '#e07070' }}
+                              onClick={() => handleAdminDeleteItem(postUrl, post.title)}
+                            >
+                              🗑️ Take down
+                            </button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
               </div>
             </div>
+          ) : activeTab === 'chat' ? (
+            !hasProAccess ? (
+              <div className="pro-gate-card">
+                <div style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '0.4rem' }}>
+                  🔒 Multi-Turn AI Builder Chat is a Signal PRO Feature
+                </div>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.86rem', maxWidth: 560, margin: '0 auto 1rem', lineHeight: 1.55 }}>
+                  Free accounts include real-time tech feeds, 50-word Inshorts summaries, up to {FREE_MAX_NICHES} personal niches, and {FREE_MAX_SAVED} saved bookmarks. Upgrade to <b>Signal PRO</b> to unlock multi-turn AI Builder Chat with persistent thread history, 4-Point Idea Network Blueprints, and PRO-exclusive drops.
+                </p>
+                <button className="btn btn-primary" onClick={() => openUpgradeModal('Unlock Multi-Turn AI Builder Chat with Signal PRO.')}>
+                  ⭐ View PRO Plan / Unlock Access
+                </button>
+              </div>
+            ) : (
+              <div className="chat-workspace">
+                <div className="chat-threads-list">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem' }}>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      CHAT HISTORY ({chatThreads.length})
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      style={{ padding: '0.25rem 0.6rem', fontSize: '0.74rem' }}
+                      onClick={handleStartBlankChat}
+                    >
+                      + New
+                    </button>
+                  </div>
+                  {chatThreads.map((t) => (
+                    <div
+                      key={t.id}
+                      className={`chat-thread-item ${t.id === activeThread?.id ? 'active' : ''}`}
+                      onClick={() => setActiveThreadId(t.id)}
+                    >
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem', fontWeight: 500 }}>
+                        {t.title}
+                      </div>
+                      <button
+                        type="button"
+                        className="thread-del-btn"
+                        onClick={(e) => handleDeleteThread(t.id, e)}
+                        title="Delete thread"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="chat-main-pane">
+                  <div className="chat-pane-header">
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{activeThread?.title}</div>
+                      {activeThread?.contextItem?.title && (
+                        <div style={{ fontSize: '0.74rem', color: 'var(--accent)' }}>
+                          Linked drop: {activeThread.contextItem.title}
+                        </div>
+                      )}
+                    </div>
+                    <button type="button" className="btn" style={{ fontSize: '0.75rem', padding: '0.3rem 0.65rem' }} onClick={() => switchTab('feed')}>
+                      ← Back to Feed
+                    </button>
+                  </div>
+
+                  <div className="chat-messages-scroll">
+                    {(activeThread?.messages || []).map((m, idx) => (
+                      <div key={idx} className={`chat-bubble ${m.role === 'user' ? 'user' : 'assistant'}`}>
+                        <div className="chat-bubble-role">
+                          {m.role === 'user' ? 'You' : '▣ Signal AI'}
+                        </div>
+                        {m.role === 'user' ? (
+                          <div>{m.content}</div>
+                        ) : (
+                          <div dangerouslySetInnerHTML={{ __html: m.content }} />
+                        )}
+                      </div>
+                    ))}
+                    {sendingChat && (
+                      <div className="chat-bubble assistant">
+                        <div className="chat-bubble-role">▣ Signal AI</div>
+                        <div style={{ color: 'var(--text-muted)' }}>Thinking…</div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="chat-quick-chips">
+                    {[
+                      'Give me the step-by-step MVP plan for a weekend',
+                      'What folder structure & database schema should I use?',
+                      'How can a beginner simplify this project?',
+                    ].map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        className="dept-pill"
+                        onClick={(e) => handleSendChat(e, q)}
+                        disabled={sendingChat}
+                      >
+                        {q}
+                      </button>
+                    ))}
+                  </div>
+
+                  <form className="chat-input-row" onSubmit={handleSendChat}>
+                    <input
+                      type="text"
+                      className="modal-input"
+                      placeholder="Ask follow-up questions about stack, code, prerequisites, or how to build this…"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      disabled={sendingChat}
+                    />
+                    <button type="submit" className="btn btn-primary" disabled={sendingChat || !chatInput.trim()}>
+                      {sendingChat ? 'Sending…' : 'Send'}
+                    </button>
+                  </form>
+                </div>
+              </div>
+            )
           ) : (
             <>
               {activeTab === 'ideas' && (
@@ -864,7 +1351,7 @@ export default function App() {
               {activeTab === 'my-feed' && (
                 <div style={{ marginBottom: '0.75rem' }}>
                   <p className="tab-caption" style={{ marginBottom: '0.45rem' }}>
-                    Tap the niches below to customize your personal feed (syncs to your account when signed in):
+                    Tap the niches below to customize your personal feed ({hasProAccess ? 'Unlimited on PRO' : `Up to ${FREE_MAX_NICHES} niches on Free`}):
                   </p>
                   <div className="dept-bar">
                     {Object.entries(DEPT_META).map(([slug, { label, color }]) => {
@@ -887,7 +1374,7 @@ export default function App() {
 
               {activeTab === 'saved' && (
                 <p className="tab-caption">
-                  Your personal vault of saved articles, builder ideas, and custom notes/summaries.
+                  Your personal vault of saved articles, builder ideas, and custom notes ({savedItems.length}{!hasProAccess ? ` / ${FREE_MAX_SAVED} Free slots used` : ' saved'}).
                 </p>
               )}
 
@@ -962,15 +1449,20 @@ export default function App() {
                     : 'No items match these filters. Try clearing search or switching sources.'}
                 </div>
               ) : (
-                visible.map((item) => (
+                visible.map((item, idx) => (
                   <FeedRow
                     item={item}
                     key={item.url || item.item_url}
                     isAuthenticated={true}
+                    userTier={effectiveTier}
+                    isProContent={isItemProExclusive(item, idx, customProMap)}
                     savedEntry={savedByUrl[item.url || item.item_url]}
                     onSaveOrUpdate={handleSaveOrUpdateItem}
                     onRemoveSaved={handleRemoveSavedItem}
                     onOpenInChat={handleOpenInChat}
+                    onOpenUpgradeModal={openUpgradeModal}
+                    onAdminDeleteItem={handleAdminDeleteItem}
+                    onAdminToggleProItem={handleAdminToggleProItem}
                   />
                 ))
               )}
@@ -985,6 +1477,129 @@ export default function App() {
             </>
           )}
         </>
+      )}
+
+      {/* ── FREE vs PRO vs ADMIN Modal ── */}
+      {upgradeModalOpen && (
+        <div className="modal-overlay" onClick={() => setUpgradeModalOpen(false)}>
+          <div
+            className="modal-card"
+            style={{ maxWidth: '680px', maxHeight: '90vh', overflowY: 'auto' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+              <h3 style={{ margin: 0 }}>⭐ Signal Account Tiers: FREE vs PRO vs ADMIN</h3>
+              <button className="btn" onClick={() => setUpgradeModalOpen(false)} style={{ padding: '0.2rem 0.6rem' }}>
+                ✕
+              </button>
+            </div>
+
+            {upgradeReason && (
+              <div className="personal-note-box" style={{ borderLeftColor: 'var(--accent)', marginBottom: '0.85rem' }}>
+                <b>🔒 Locked Feature:</b> {upgradeReason}
+              </div>
+            )}
+
+            <div className="tier-compare-grid">
+              <div className={`tier-plan-box ${effectiveTier === 'free' ? 'active-plan' : ''}`}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontWeight: 700, fontSize: '0.95rem' }}>Signal FREE</span>
+                  <span className="tier-badge">FREE</span>
+                </div>
+                <div style={{ fontSize: '1.25rem', fontWeight: 800, margin: '0.35rem 0 0.6rem' }}>₹0 / forever</div>
+                <ul className="tier-feature-list">
+                  <li>✓ Standard News Feed &amp; Builder Ideas</li>
+                  <li>✓ 50-word AI summaries on free posts</li>
+                  <li>✓ Up to {FREE_MAX_NICHES} niches in <b>✨ My Feed</b></li>
+                  <li>✓ Up to {FREE_MAX_SAVED} bookmarks &amp; personal notes</li>
+                  <li>✓ Daily Top 10 Traction Newsletter</li>
+                  <li style={{ color: 'var(--text-dim)' }}>🔒 PRO-Exclusive Deep-Dive Drops locked</li>
+                  <li style={{ color: 'var(--text-dim)' }}>🔒 Idea Network &amp; 4-Point Blueprints locked</li>
+                  <li style={{ color: 'var(--text-dim)' }}>🔒 Multi-Turn AI Builder Chat locked</li>
+                  <li style={{ color: 'var(--text-dim)' }}>🔒 Weekly AI Playbook &amp; Summary Rewrites locked</li>
+                </ul>
+                <button
+                  type="button"
+                  className="btn btn-block"
+                  onClick={() => handleSelectTierMode('free', false)}
+                  disabled={switchingTier || effectiveTier === 'free'}
+                >
+                  {effectiveTier === 'free' ? 'Current Tier (FREE)' : 'Switch to FREE View'}
+                </button>
+              </div>
+
+              <div className={`tier-plan-box pro-plan ${effectiveTier === 'pro' ? 'active-plan' : ''}`}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontWeight: 700, fontSize: '0.95rem', color: 'var(--accent)' }}>Signal PRO</span>
+                  <span className="tier-badge pro">PRO</span>
+                </div>
+                <div style={{ fontSize: '1.25rem', fontWeight: 800, margin: '0.35rem 0 0.6rem' }}>Full Builder Access</div>
+                <ul className="tier-feature-list">
+                  <li>⭐ <b>Unlocks all 🔒 PRO-Exclusive Drops</b></li>
+                  <li>⭐ <b>Unlimited 🕸️ Connect &amp; Brainstorm</b> (4-Point Blueprints)</li>
+                  <li>⭐ <b>Unlimited 💬 Multi-Turn AI Builder Chat</b> with history</li>
+                  <li>⭐ <b>Unlimited ✨ My Feed niches &amp; 🔖 Saved items</b></li>
+                  <li>⭐ <b>Custom Summary Overrides</b> in your vault</li>
+                  <li>⭐ <b>🧠 Weekly &ldquo;How to Use It&rdquo; AI Playbook</b> newsletter</li>
+                </ul>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-block"
+                  onClick={() => handleSelectTierMode('pro', false)}
+                  disabled={switchingTier || effectiveTier === 'pro'}
+                >
+                  {effectiveTier === 'pro' ? '✓ PRO Active' : '⭐ Activate PRO Access'}
+                </button>
+              </div>
+            </div>
+
+            {/* Site Owner / Admin Elevation Box */}
+            <div
+              style={{
+                marginTop: '1rem',
+                paddingTop: '0.85rem',
+                borderTop: '1px solid var(--border)',
+              }}
+            >
+              <div style={{ fontWeight: 600, fontSize: '0.84rem', marginBottom: '0.3rem' }}>
+                🛡️ Site Owner / Admin Login
+              </div>
+              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0 0 0.55rem' }}>
+                Enter your Admin Passcode (default: <code>signal-admin-2026</code> or <code>ADMIN_SECRET</code> in Render env vars) to unlock the <b>🛡️ Admin Console</b>, remove bad published posts, and grant/suspend user accounts.
+              </p>
+              <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
+                <input
+                  type="password"
+                  className="modal-input"
+                  style={{ flex: 1, minWidth: '190px' }}
+                  placeholder="Admin Passcode (default: signal-admin-2026)"
+                  value={adminSecretInput}
+                  onChange={(e) => setAdminSecretInput(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ borderColor: 'var(--idea)', color: 'var(--idea)', fontWeight: 600 }}
+                  onClick={() => handleSelectTierMode('admin', true)}
+                  disabled={switchingTier}
+                >
+                  {effectiveTier === 'admin' ? '✓ ADMIN Active' : '🛡️ Unlock ADMIN Mode'}
+                </button>
+              </div>
+
+              {tierActionMsg && (
+                <div style={{ color: 'var(--good)', fontSize: '0.78rem', marginTop: '0.5rem' }}>
+                  {tierActionMsg}
+                </div>
+              )}
+              {tierActionErr && (
+                <div style={{ color: '#e08080', fontSize: '0.78rem', marginTop: '0.5rem' }}>
+                  {tierActionErr}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
